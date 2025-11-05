@@ -11,7 +11,7 @@ Note, due to dependency issues with mobile-env, this does not work on python>3.1
 
 1.  **Clone the Repository:**
     ```bash
-    git clone [https://github.com/anderspearson206/lunar-mesh-env.git](https://github.com/anderspearson206/lunar-mesh-env.git)
+    git clone https://github.com/anderspearson206/lunar-mesh-env.git
     cd lunar-mesh-env
     ```
 
