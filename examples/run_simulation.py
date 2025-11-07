@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from lunar_mesh_env import CustomEnv, RadioMapModel
 
 
+
 if __name__ == "__main__":
     
     DATA_ROOT = '../../NASA_DCGR_NETWORKING/radio_data_2/radio_data_2'
@@ -94,7 +95,7 @@ if __name__ == "__main__":
 
     plot_live = False 
     
-    for i in range(100):
+    for i in range(10):
         print(f"Step {i+1}/100")
         dummy_action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(dummy_action)

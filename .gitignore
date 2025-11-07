@@ -5,3 +5,12 @@
 *.npy
 
 .venv/
+
+RadioLunaDiff/dataset*
+RadioLunaDiff/pre*
+RadioLunaDiff/requirements.txt
+RadioLunaDiff/test*
+RadioLunaDiff/train*
+
+
+
