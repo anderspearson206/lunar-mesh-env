@@ -19,8 +19,8 @@ if __name__ == "__main__":
     
     i, j, k = 18, 29, 15
     HM_PATH = f'{DATA_ROOT}/hm/hm_{i}.npy'
-    TX_A_PATH = f'{DATA_ROOT}/tx/tx_{i}_{j}.npy' 
-    TX_B_PATH = f'{DATA_ROOT}/tx/tx_{i}_{k}.npy'
+    # TX_A_PATH = f'{DATA_ROOT}/tx/tx_{i}_{j}.npy' 
+    # TX_B_PATH = f'{DATA_ROOT}/tx/tx_{i}_{k}.npy'
 
     # pretrained model paths
     MODEL_PATHS = {
@@ -38,24 +38,24 @@ if __name__ == "__main__":
 
     # for now, since this should mimic the static version, we 
     # manually find the coords
-    try:
-        tx_map_a = np.load(TX_A_PATH)
-        row_a, col_a = np.unravel_index(np.argmax(tx_map_a), tx_map_a.shape)
-        x_a = (col_a / (tx_map_a.shape[1] - 1)) * WIDTH
-        y_a = (row_a / (tx_map_a.shape[0] - 1)) * HEIGHT
-        agent_a_pos = (x_a, y_a)
-        print(f"Loaded Agent A position: {agent_a_pos}")
+    # try:
+    #     tx_map_a = np.load(TX_A_PATH)
+    #     row_a, col_a = np.unravel_index(np.argmax(tx_map_a), tx_map_a.shape)
+    #     x_a = (col_a / (tx_map_a.shape[1] - 1)) * WIDTH
+    #     y_a = (row_a / (tx_map_a.shape[0] - 1)) * HEIGHT
+    #     agent_a_pos = (x_a, y_a)
+    #     print(f"Loaded Agent A position: {agent_a_pos}")
 
-        tx_map_b = np.load(TX_B_PATH)
-        row_b, col_b = np.unravel_index(np.argmax(tx_map_b), tx_map_b.shape)
-        x_b = (col_b / (tx_map_b.shape[1] - 1)) * WIDTH
-        y_b = (row_b / (tx_map_b.shape[0] - 1)) * HEIGHT
-        agent_b_pos = (x_b, y_b)
-        print(f"Loaded Agent B position: {agent_b_pos}")
+    #     tx_map_b = np.load(TX_B_PATH)
+    #     row_b, col_b = np.unravel_index(np.argmax(tx_map_b), tx_map_b.shape)
+    #     x_b = (col_b / (tx_map_b.shape[1] - 1)) * WIDTH
+    #     y_b = (row_b / (tx_map_b.shape[0] - 1)) * HEIGHT
+    #     agent_b_pos = (x_b, y_b)
+    #     print(f"Loaded Agent B position: {agent_b_pos}")
         
-    except Exception as e:
-        print(f"FATAL: Could not load TX maps to find agent positions. Error: {e}")
-        sys.exit(1)
+    # except Exception as e:
+    #     print(f"FATAL: Could not load TX maps to find agent positions. Error: {e}")
+    #     sys.exit(1)
 
 
     try:
@@ -83,15 +83,15 @@ if __name__ == "__main__":
         render_mode="rgb_array",
         hm_path=HM_PATH,         
         radio_model=radio_model,  
-        agent_a_pos=agent_a_pos, 
-        agent_b_pos=agent_b_pos 
+        # agent_a_pos=agent_a_pos, 
+        # agent_b_pos=agent_b_pos 
     )
 
     obs, info = env.reset() 
     frames = [] 
     done = False
     
-    num_steps = 10
+    num_steps = 100
     print(f"Running simulation for {num_steps} steps and collecting frames...")
 
     plot_live = False 

@@ -114,23 +114,35 @@ class CustomEnv(MComCore):
         }
         
 
-        stationary_agent_config = config["ue"].copy()
-        stationary_agent_config['velocity'] = 0
+        # stationary_agent_config = config["ue"].copy()
+        # stationary_agent_config['velocity'] = 0
 
-        # just 3 agents for now
+        # # just 3 agents for now
+        # agents = [
+        #     # Agent "A": ue_id=1, stationary
+        #     MeshAgent(ue_id=1, **stationary_agent_config, **tx_params),
+        #     # Agent "B": ue_id=2, stationary
+        #     MeshAgent(ue_id=2, **stationary_agent_config, **tx_params),
+        #     # Agent "C": ue_id=3, mobile
+        #     MeshAgent(ue_id=3, **config["ue"], **tx_params),
+        # ]
+        
+        
+        # setattr(agents[0], 'is_stationary', True) # Agent A
+        # setattr(agents[1], 'is_stationary', True) # Agent B
+        # setattr(agents[2], 'is_stationary', False) # Agent C
+        
+        # just 3 agents for now, all mobile
         agents = [
-            # Agent "A": ue_id=1, stationary
-            MeshAgent(ue_id=1, **stationary_agent_config, **tx_params),
-            # Agent "B": ue_id=2, stationary
-            MeshAgent(ue_id=2, **stationary_agent_config, **tx_params),
+            # Agent "A": ue_id=1, mobile
+            MeshAgent(ue_id=1, **config["ue"], **tx_params),
+            # Agent "B": ue_id=2, mobile
+            MeshAgent(ue_id=2, **config["ue"], **tx_params),
             # Agent "C": ue_id=3, mobile
             MeshAgent(ue_id=3, **config["ue"], **tx_params),
         ]
-        
 
-        setattr(agents[0], 'is_stationary', True) # Agent A
-        setattr(agents[1], 'is_stationary', True) # Agent B
-        setattr(agents[2], 'is_stationary', False) # Agent C
+        
 
         self.agents = {agent.ue_id: agent for agent in agents}
         self.NUM_AGENTS = len(self.agents)
@@ -422,11 +434,16 @@ class CustomEnv(MComCore):
         self.monitor.update(self)
 
 
+        # for agent in self.active:
+        #     agent.is_moving = False 
+        #     if not getattr(agent, 'is_stationary', False):
+        #         agent.x, agent.y = self.movement.move(agent)
+        #         agent.is_moving = True
+        
         for agent in self.active:
             agent.is_moving = False 
-            if not getattr(agent, 'is_stationary', False):
-                agent.x, agent.y = self.movement.move(agent)
-                agent.is_moving = True
+            agent.x, agent.y = self.movement.move(agent)
+            agent.is_moving = True
 
         self.update_custom_links()
         

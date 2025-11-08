@@ -95,7 +95,7 @@ if __name__ == "__main__":
 
     plot_live = False 
     
-    for i in range(10):
+    for i in range(100):
         print(f"Step {i+1}/100")
         dummy_action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(dummy_action)

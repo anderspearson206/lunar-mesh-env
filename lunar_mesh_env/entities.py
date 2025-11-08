@@ -4,7 +4,7 @@ from mobile_env.core.entities import UserEquipment
 
 # forward-declare RadioMapModel to avoid a circular import
 if False:
-    from .radio_model import RadioMapModel
+    from .radio_model_nn import RadioMapModelNN
 
 class MeshAgent(UserEquipment):
     """
