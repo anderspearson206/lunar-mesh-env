@@ -43,6 +43,7 @@ class MeshAgent(UserEquipment):
         self.current_datarate = 0.0
         self.energy = 1000.0 
         self.is_moving = False 
+        self.total_distance = 0.0
 
     def __str__(self):
         return f"MeshAgent: {self.ue_id}"

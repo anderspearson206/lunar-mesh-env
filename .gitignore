@@ -12,5 +12,8 @@ RadioLunaDiff/requirements.txt
 RadioLunaDiff/test*
 RadioLunaDiff/train*
 
+*.pyc
+*_pycache_*
 
-
+./lunar_mesh_env/__pycache__/
+*__pycache__*

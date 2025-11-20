@@ -98,7 +98,17 @@ class CustomEnv(MComCore):
             self.heightmap = np.load(self.heightmap_path)
         except Exception as e:
             print(f"Warning: Could not load heightmap from {self.heightmap_path}: {e}")
+        
+        
+        # MOVEMENT PARAMS
+        #  viper rover is .2 when not using tools, .1 when using tools
+        self.ROVER_SPEED = 0.2 # m/s
+        self.STEP_LENGTH = 25.0
+        self.METERS_PER_PIXEL = 1.0
 
+        self.MAX_DIST_PER_STEP = (self.ROVER_SPEED * self.STEP_LENGTH)/self.METERS_PER_PIXEL
+        
+        self.sim_time_seconds= 0.0
 
         # ENERGY CONSTRAINTS:
         # TODO implement real values
@@ -207,7 +217,8 @@ class CustomEnv(MComCore):
         super(MComCore, self).reset(seed=seed)
 
  
-        self.time = 0.0
+        self.time = 0.0 # step counter
+        self.sim_time_seconds = 0.0 #continous physics time
 
         if seed is not None:
             self.seeding({"seed": seed})
@@ -403,11 +414,11 @@ class CustomEnv(MComCore):
     def step(self, actions: Dict[int, int]):
         """
         Overrides the parent `step` method to implement mesh networking logic.
+        Now enforces physical movement limits based on ROVER_SPEED and STEP_LENGTH.
         """
         assert not self.time_is_up, "step() called on terminated episode"
 
         actions = self.handler.action(self, actions)
-
 
         self.update_connections()
 
@@ -421,8 +432,6 @@ class CustomEnv(MComCore):
 
         self.macro = self.macro_datarates(self.datarates)
 
-        # this was tracked in mobile-env, may implement it properly again here
-        # but for now its a placeholder
         self.utilities = {
             agent: self.utility.utility(self.macro[agent]) for agent in self.active
         }
@@ -435,17 +444,39 @@ class CustomEnv(MComCore):
 
         self.monitor.update(self)
 
-
-        # for agent in self.active:
-        #     agent.is_moving = False 
-        #     if not getattr(agent, 'is_stationary', False):
-        #         agent.x, agent.y = self.movement.move(agent)
-        #         agent.is_moving = True
-        
+        #  movement logic
         for agent in self.active:
             agent.is_moving = False 
-            agent.x, agent.y = self.movement.move(agent)
-            agent.is_moving = True
+            
+            old_x, old_y = agent.x, agent.y
+            proposed_x, proposed_y = self.movement.move(agent)
+            
+            dx = proposed_x - old_x
+            dy = proposed_y - old_y
+            dist = np.sqrt(dx**2 + dy**2)
+            
+            actual_dist_moved = 0.0
+
+            # enforce speed limit and calc distance
+            if dist > self.MAX_DIST_PER_STEP:
+                scale_factor = self.MAX_DIST_PER_STEP / dist
+                new_x = old_x + (dx * scale_factor)
+                new_y = old_y + (dy * scale_factor)
+                actual_dist_moved = self.MAX_DIST_PER_STEP 
+                agent.is_moving = True 
+            elif dist > 0:
+                new_x = proposed_x
+                new_y = proposed_y
+                actual_dist_moved = dist
+                agent.is_moving = True
+            else:
+                new_x = old_x
+                new_y = old_y
+                actual_dist_moved = 0.0
+                agent.is_moving = False
+
+            agent.x, agent.y = new_x, new_y
+            agent.total_distance += actual_dist_moved
 
         self.update_custom_links()
         
@@ -510,6 +541,7 @@ class CustomEnv(MComCore):
         self.calculate_mesh_datarates()
 
         self.time += 1
+        self.sim_time_seconds += self.STEP_LENGTH 
 
         # check whether episode is done & close the environment
         if self.time_is_up and self.window:
@@ -521,6 +553,9 @@ class CustomEnv(MComCore):
             observation = self.handler.observation(self)
             info = self.handler.info(self)
             info = {**info, **self.monitor.info()}
+            
+            info['sim_time_s'] = self.sim_time_seconds
+            
             terminated = False
             truncated = self.time_is_up
             rewards = self.handler.reward(self)
@@ -542,19 +577,24 @@ class CustomEnv(MComCore):
             else:
                 info['route_freq'] = np.nan # No route
             info['agent_1_energy'] = agent_a.energy
-
+            info['agent_1_dist'] = self.agents[1].total_distance
+            
         if 2 in self.agents:
             info['agent_2_energy'] = self.agents[2].energy
+            info['agent_2_dist'] = self.agents[2].total_distance
         if 3 in self.agents:
             info['agent_3_energy'] = self.agents[3].energy
+            info['agent_3_dist'] = self.agents[3].total_distance
             
         info['total_energy_consumed_step'] = self.total_energy_consumed_step
+
+        # pass back the actual physics time
+        info['sim_time_s'] = self.sim_time_seconds
 
         terminated = False
         truncated = self.time_is_up
 
         return observation, rewards, terminated, truncated, info
-
 
 
     def render(self) -> None:
@@ -578,8 +618,8 @@ class CustomEnv(MComCore):
         gs = fig.add_gridspec(
             ncols=4, 
             nrows=3,
-            width_ratios=(4, 4, 4, 2), 
-            height_ratios=(2, 3, 3),
+            width_ratios=(4, 4, 4, 3.5), 
+            height_ratios=(3, 3, 3),
             hspace=0.45,
             wspace=0.4, 
             top=0.95,
@@ -801,38 +841,43 @@ class CustomEnv(MComCore):
         ax.spines["right"].set_visible(False)
         ax.spines["left"].set_visible(False)
 
+        ax.set_title(f"Sim Time: {self.sim_time_seconds:.1f} s", fontweight='bold', fontsize=12)
+
         rows = ["Agent A", "Agent B", "Agent C"]
-        cols = ["Datarate (Mbps)", "Utility", "Energy Left"]
-        
+        cols = ["Rate (Mbps)", "Util", "Energy", "Dist (m)"] 
+
         # data for agent A
-        dr_a, ut_a, en_a = "N/A", "N/A", "N/A"
+        dr_a, ut_a, en_a, dist_a = "N/A", "N/A", "N/A", "0.0"
         if 1 in self.agents:
             agent_a = self.agents[1]
             dr_a = f"{agent_a.current_datarate:.1f}"
             ut_a = f"{self.utilities.get(agent_a, 0.0):.2f}"
             en_a = f"{agent_a.energy:.1f}"
+            dist_a = f"{agent_a.total_distance:.1f}" 
 
         # data for agent B
-        dr_b, ut_b, en_b = "N/A", "N/A", "N/A"
+        dr_b, ut_b, en_b, dist_b = "N/A", "N/A", "N/A", "0.0"
         if 2 in self.agents:
             agent_b = self.agents[2]
             is_relay = any(sender == agent_b for sender, _ in self.custom_links.keys())
             dr_b = "Relay" if is_relay else "Idle"
             ut_b = f"{self.utilities.get(agent_b, 0.0):.2f}"
             en_b = f"{agent_b.energy:.1f}"
+            dist_b = f"{agent_b.total_distance:.1f}" 
 
         # data for agent C
-        dr_c, ut_c, en_c = "N/A", "N/A", "N/A"
+        dr_c, ut_c, en_c, dist_c = "N/A", "N/A", "N/A", "0.0"
         if 3 in self.agents:
             agent_c = self.agents[3]
             dr_c = "Receiving" if (1 in self.agents and self.agents[1].active_route) else "Idle"
             ut_c = f"{self.utilities.get(agent_c, 0.0):.2f}"
             en_c = f"{agent_c.energy:.1f}"
+            dist_c = f"{agent_c.total_distance:.1f}" 
 
         text = [
-            [dr_a, ut_a, en_a],
-            [dr_b, ut_b, en_b],
-            [dr_c, ut_c, en_c],
+            [dr_a, ut_a, en_a, dist_a],
+            [dr_b, ut_b, en_b, dist_b],
+            [dr_c, ut_c, en_c, dist_c],
         ]
 
         table = ax.table(
@@ -845,7 +890,7 @@ class CustomEnv(MComCore):
             bbox=[0.0, -0.25, 1.0, 1.25],
         )
         table.auto_set_font_size(False)
-        table.set_fontsize(11)
+        table.set_fontsize(10) 
 
     def render_avg_datarate(self, ax) -> None:
         """
@@ -876,4 +921,4 @@ class CustomEnv(MComCore):
         ax.set_xlabel("Time")
         ax.set_ylabel("Avg. Energy / Step") 
         ax.set_xlim([0.0, self.EP_MAX_TIME])
-        ax.set_ylim([0.0, 10.0]) 
+        ax.set_ylim([0.0, 100.0]) 
