@@ -1,6 +1,6 @@
 # lunar-mesh-env
 
-A custom [Gymnasium](https://gymnasium.farama.org/)-compatible environment for simulating agent based lunar mesh networks. This environment is built on [mobile-env](https://github.com/j-schuer/mobile-env) but is for mesh netowkrs
+A custom [Gymnasium](https://gymnasium.farama.org/)-compatible environment for simulating agent based lunar mesh networks. This environment is built on [mobile-env](https://github.com/j-schuer/mobile-env) but is for mesh networks.
 
 The simulation focuses on a small number of agents (rovers) in a lunar-like terrain, where they must establish communication routes using multiple frequencies and manage their energy consumption.
 
@@ -8,7 +8,9 @@ Support for dynamic radio map prediction via [RadioLunaDiff](https://github.com/
 
 ## Installation
 
-Note, due to dependency issues with mobile-env, this does not work on python>3.10
+> **COMPATIBILITY WARNING**
+> This project **strictly requires Python 3.10**.
+> Due to upstream dependency constraints in `mobile-env`, this package will not function correctly on Python 3.11 or newer.
 
 1.  **Clone the Repository:**
 
@@ -17,7 +19,14 @@ Note, due to dependency issues with mobile-env, this does not work on python>3.1
     cd lunar-mesh-env
     ```
 
-2.  **Install Dependencies:**
+2.  **Set up Conda environment (reccomended):**
+
+    ```bash
+    conda create -n lunar_mesh python=3.10
+    conda activate lunar_mesh
+    ```
+
+3.  **Install Dependencies:**
     For use without the RadioLunaDiff model:
     `bash
 pip install -r requirements.txt
