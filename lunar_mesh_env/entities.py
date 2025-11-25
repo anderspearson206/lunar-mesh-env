@@ -49,7 +49,7 @@ class MeshAgent(UserEquipment):
         return f"MeshAgent: {self.ue_id}"
 
 
-    def policy_decide_route(self,
+    def heuristic_resolve_route(self,
                              target_agent: 'MeshAgent', 
                              all_agents: List['MeshAgent'], 
                              radio_model: 'RadioMapModel', 
@@ -168,3 +168,30 @@ class MeshAgent(UserEquipment):
         row_idx = np.clip(row_idx, 0, map_shape[0] - 1)
         
         return radio_map[row_idx, col_idx]
+    
+    
+    
+    def get_local_observation(self, env_heightmap, all_agents_positions):
+        """
+        Generates the local observation for this agent, will be used later
+        for switch to petting zoo
+        """
+        my_state = np.array([self.energy, self.x, self.y, self.current_datarate])
+        
+        # in the future we may want to return a cropped version of the hm,
+        # for now we return the whole terrain 
+                
+        # 3. Relative positions of neighbors (Decentralized logic)
+        # Instead of absolute positions, calculate relative dx, dy to others
+        neighbor_features = []
+        for other in all_agents_positions:
+            if other.ue_id != self.ue_id:
+                dx = other.x - self.x
+                dy = other.y - self.y
+                neighbor_features.append([dx, dy])
+                
+        return {
+            "self_state": my_state,
+            "terrain": env_heightmap, # Or local crop
+            "neighbors": np.array(neighbor_features)
+        }

@@ -91,7 +91,7 @@ if __name__ == "__main__":
     frames = [] 
     done = False
     
-    num_steps = 20
+    num_steps = 5
     print(f"Running simulation for {num_steps} steps and collecting frames...")
 
     plot_live = False 

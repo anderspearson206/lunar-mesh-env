@@ -302,7 +302,7 @@ class CustomEnv(MComCore):
             return
 
 
-        route_links = agent_a.policy_decide_route(
+        route_links = agent_a.heuristic_resolve_route(
             agent_c, 
             list(self.agents.values()),
             self.radio_model, 
@@ -540,61 +540,73 @@ class CustomEnv(MComCore):
         
         self.calculate_mesh_datarates()
 
+        # Update global time
         self.time += 1
         self.sim_time_seconds += self.STEP_LENGTH 
 
-        # check whether episode is done & close the environment
-        if self.time_is_up and self.window:
-            self.close()
 
-        # do not invoke next step on policies before at least one UE is active
-        if not self.active and not self.time_is_up:
-            # still dummy
+        terminated = {}
+        truncated = {}
+        
+        is_global_time_up = self.time_is_up
+
+        for agent_id, agent in self.agents.items():
+            # termination condition? we may want to remove, but we can 
+            # use this to model the really bad outcomes (stuck in a crater)
+            terminated[agent_id] = agent.energy <= 0
+            
+            # global sim time is up
+            truncated[agent_id] = is_global_time_up
+
+        # If no agents are active, return some placeholder dicts, early exit
+        if not self.active and not is_global_time_up:
             observation = self.handler.observation(self)
             info = self.handler.info(self)
             info = {**info, **self.monitor.info()}
-            
             info['sim_time_s'] = self.sim_time_seconds
             
-            terminated = False
-            truncated = self.time_is_up
             rewards = self.handler.reward(self)
+            
             return observation, rewards, terminated, truncated, info
 
-        # compute observations for next step and information
         observation = self.handler.observation(self)
         info = self.handler.info(self)
-
         info = {**info, **self.monitor.info()}
         
         # metric tracking
-        if 1 in self.agents:
-            agent_a = self.agents[1]
-            info['datarate'] = agent_a.current_datarate
-            info['is_connected'] = (agent_a.active_route is not None)
-            if agent_a.active_route:
-                info['route_freq'] = 1.0 if agent_a.active_route[1] == '5.8' else 0.0 # 1.0 for 5.8, 0.0 for 415
+        for agent_id, agent in self.agents.items():
+            prefix = f"agent_{agent_id}"
+            
+            # data/connection info
+            info[f'{prefix}_datarate'] = agent.current_datarate
+            info[f'{prefix}_is_connected'] = (agent.active_route is not None)
+            
+            if agent.active_route:
+                # 1 for 5.8GHz, 0 for 415MHz
+                info[f'{prefix}_route_freq'] = 1.0 if agent.active_route[1] == '5.8' else 0.0
             else:
-                info['route_freq'] = np.nan # No route
-            info['agent_1_energy'] = agent_a.energy
-            info['agent_1_dist'] = self.agents[1].total_distance
+                info[f'{prefix}_route_freq'] = np.nan
             
-        if 2 in self.agents:
-            info['agent_2_energy'] = self.agents[2].energy
-            info['agent_2_dist'] = self.agents[2].total_distance
-        if 3 in self.agents:
-            info['agent_3_energy'] = self.agents[3].energy
-            info['agent_3_dist'] = self.agents[3].total_distance
-            
-        info['total_energy_consumed_step'] = self.total_energy_consumed_step
+            info[f'{prefix}_energy'] = agent.energy
+            info[f'{prefix}_dist'] = agent.total_distance
 
-        # pass back the actual physics time
+        # global metrics
+        info['total_energy_consumed_step'] = self.total_energy_consumed_step
         info['sim_time_s'] = self.sim_time_seconds
 
-        terminated = False
-        truncated = self.time_is_up
+        #close env
+        if is_global_time_up and self.window:
+            self.close()
 
-        return observation, rewards, terminated, truncated, info
+        # return dicts
+        rewards = self.handler.reward(self)
+        
+        # COMPATIBILITY hACK:
+        # Convert dicts back to scalar for Gym, but keep the dict logic ready for PettingZoo
+        gym_terminated = any(terminated.values()) # Episode ends if ANYONE dies? Or everyone?
+        gym_truncated = any(truncated.values())   # Episode ends if time is up
+        
+        return observation, rewards, gym_terminated, gym_truncated, info
 
 
     def render(self) -> None:
