@@ -7,7 +7,7 @@ from torch import nn
 from torchvision import transforms
 from torchvision.transforms import Normalize
 from diffusers import UNet2DModel, DDPMScheduler
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List
 
 from RadioLunaDiff.k2net.diff_modules import K2_UNet
 from RadioLunaDiff.pmnet.models.pmnet_v3 import PMNet
@@ -20,9 +20,6 @@ class RadioMapModelNN:
     """
     A generative model that runs a 3-stage NN pipeline to predict
     a radiomap based on a transmitter's location and frequency.
-    
-    This model now uses InferenceInputProcessor to correctly
-    pre-process all inputs to match training conditions.
     """
     def __init__(self,
                  model_paths: Dict[str, str],
@@ -173,6 +170,90 @@ class RadioMapModelNN:
             
             # convert back to correct range based on oriinal training
             # dataloaders
+            output_dbm = (output_map_0_1 * 210.0) - 200.0
+            
+            return output_dbm
+        
+        
+    def generate_map_batch(self, tx_positions: List[Tuple[float, float]], frequency: str) -> np.ndarray:
+        """
+        Generates a batch of radiomaps for a list of transmitter positions.
+        
+        Args:
+            tx_positions: List of (x, y) tuples.
+            frequency: '5.8' or '415'.
+            
+        Returns:
+            np.ndarray of shape (Batch_Size, Height, Width) containing dBm values.
+        """
+        batch_size = len(tx_positions)
+        if batch_size == 0:
+            return np.array([])
+
+        with torch.no_grad():
+            # batch tx maps
+            tx_maps_list = [
+                self.processor.create_tx_map(pos, self.width, self.height, self.device)
+                for pos in tx_positions
+            ]
+            tx_maps = torch.stack(tx_maps_list) 
+
+            # batch freq maps
+            freq_map_single = self.processor.create_freq_map(frequency, self.device)
+            freq_maps = freq_map_single.unsqueeze(0).expand(batch_size, -1, -1) 
+
+            # expand hms
+            static_hm_batch = self.static_hm_tensor.unsqueeze(0).expand(batch_size, -1, -1)
+            static_fhm_batch = self.static_fhm_tensor.unsqueeze(0).expand(batch_size, -1, -1)
+
+            unnorm_inputs = torch.stack([
+                static_hm_batch, 
+                tx_maps, 
+                freq_maps, 
+                static_fhm_batch
+            ], dim=1)
+
+            k2_inputs = self.normalize_transform(unnorm_inputs)
+            pm_inputs = k2_inputs.clone()
+            
+            conditioning_maps = k2_inputs 
+            
+            # K2Net
+            k2_map_pred = torch.sigmoid(self.k2_model(k2_inputs))
+            
+            # PMNet
+            pm_inputs_cat = torch.cat([pm_inputs, k2_map_pred.clone()], dim=1)
+            pm_pred = self.pmnet(pm_inputs_cat)
+
+            # normalize intermediates
+            pm_pred_norm = self.normalize_transform_single(pm_pred)
+            k2_map_norm = self.normalize_transform_single(k2_map_pred)
+            
+            # diffusion loop
+            generated_images = torch.randn(
+                (batch_size, 1, self.image_size, self.image_size),
+                device=self.device
+            )
+            
+            for t in self.noise_scheduler.timesteps:
+                model_input = torch.cat([
+                    generated_images,       
+                    conditioning_maps,      
+                    pm_pred_norm,           
+                    k2_map_norm             
+                ], dim=1)
+
+                noise_pred = self.model(model_input, t, return_dict=False)[0]
+                
+                generated_images = self.noise_scheduler.step(
+                    noise_pred, t, generated_images, return_dict=False
+                )[0]
+
+            final_gen_norm = pm_pred_norm + generated_images
+            final_gen_0_1 = self._denormalize(final_gen_norm)
+            
+            output_map_0_1 = final_gen_0_1.squeeze(1).cpu().numpy()
+            
             output_dbm = (output_map_0_1 * 210.0) - 200.0
             
             return output_dbm

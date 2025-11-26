@@ -17,3 +17,6 @@ RadioLunaDiff/train*
 
 ./lunar_mesh_env/__pycache__/
 *__pycache__*
+
+examples/run_heuristic.py
+examples/test_marl.py
