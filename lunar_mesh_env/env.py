@@ -99,12 +99,16 @@ class CustomEnv(MComCore):
 
 
         # ENERGY CONSTRAINTS:
+        step_duration = 10 # seconds per step
         # TODO implement real values
-        self.START_ENERGY = 1000.0
-        self.COST_MOVE_PER_STEP = 5.0
-        self.COST_TX_5G_PER_STEP = 1.0
-        self.COST_TX_415_PER_STEP = 2.0
-        self.COST_IDLE_PER_STEP = 0.1
+        self.START_ENERGY = 10000.0
+        # Energy consumption in Joules (Watts * seconds)
+        self.COST_MOVE_PER_STEP = 36 * step_duration # Assumed max efficiency
+        # Router is always on so constant power draw.
+        self.COST_TX_5G_PER_STEP = 0 * step_duration
+        self.COST_TX_415_PER_STEP =  0 * step_duration
+
+        self.COST_IDLE_PER_STEP = (33.25 + 6.27) * step_duration # Power consumption of RT-AC86U + Jetson
 
 
         tx_params = {
@@ -857,4 +861,4 @@ class CustomEnv(MComCore):
         ax.set_xlabel("Time")
         ax.set_ylabel("Avg. Energy / Step") 
         ax.set_xlim([0.0, self.EP_MAX_TIME])
-        ax.set_ylim([0.0, 10.0]) 
+        ax.set_ylim([0.0, 1000.0]) 
