@@ -49,7 +49,7 @@ def main():
     frames = []
     
     print("Starting simulation...")
-    for step in range(50):
+    for step in range(10):
         # Sample random actions
         # Action format: [Move (0-4), Comm (0-N)]
         actions = {
@@ -75,7 +75,7 @@ def main():
     if frames:
         print(f"Saving GIF ({len(frames)} frames)...")
         imageio.mimsave('marl_simulation.gif', frames, fps=4)
-        imageio.mimwrite('simulation_nn.mp4', frames, fps=5, output_params=['-vcodec', 'libx264'])
+        imageio.mimwrite('marl_simulation.mp4', frames, fps=5, output_params=['-vcodec', 'libx264'])
         print("Done!")
 
 if __name__ == "__main__":
