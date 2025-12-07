@@ -3,6 +3,7 @@ import functools
 import gymnasium
 from gymnasium import spaces
 from pettingzoo import ParallelEnv
+import functools
 
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -65,19 +66,11 @@ class LunarRoverMeshEnv(ParallelEnv):
                 bw=20
             )
 
-        self.action_spaces = {
-            # [Movement (0-4), Communication Target (0-N)]
-            agent: spaces.MultiDiscrete([5, num_agents + 1]) 
-            for agent in self.agents
-        }
-
         self.observation_spaces = {
-            agent: spaces.Dict({
-                "self_state": spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
-                "terrain": spaces.Box(low=0, high=1, shape=(1, int(self.height), int(self.width)), dtype=np.float32),
-                "neighbors": spaces.Box(low=-np.inf, high=np.inf, shape=(num_agents-1, 2), dtype=np.float32)
-            })
-            for agent in self.agents
+            agent: self.observation_space(agent) for agent in self.possible_agents
+        }
+        self.action_spaces = {
+            agent: self.action_space(agent) for agent in self.possible_agents
         }
 
 
@@ -183,7 +176,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                 if target_str != agent_id:
                     target_agent = self.agent_map[target_str]
                     
-                    # get map and chack signal
+                    # get map and check signal
                     radio_map = self._get_radio_map(agent)
                 
                     rssi = self._get_signal_strength(radio_map, target_agent)
@@ -259,55 +252,91 @@ class LunarRoverMeshEnv(ParallelEnv):
             obs_dict['terrain'] = np.expand_dims(obs_dict['terrain'], axis=0)
         return obs_dict
 
-    def action_space(self, agent):
-        return self.action_spaces[agent]
-
+    
+    @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
-        return self.observation_spaces[agent]
+        """Defines the observation space for each agent."""
+        
+        num_neighbors = len(self.possible_agents) - 1
+        
+        # for masking - movement (5) + comm targets (num_agents + 1)
+        mask_dim = 5 + len(self.possible_agents) + 1
+        
+        return spaces.Dict({
+            # continuous stats, (energy, x, y, datarate)
+            "self_state": spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
+            # heightmap obs space
+            "terrain": spaces.Box(low=0, high=1, shape=(1, int(self.height), int(self.width)), dtype=np.float32),
+            # neighbor relative positions
+            "neighbors": spaces.Box(low=-np.inf, high=np.inf, shape=(num_neighbors, 2), dtype=np.float32),
+            # action mask for RLLib support 
+            "action_mask": spaces.Box(low=0, high=1, shape=(mask_dim,), dtype=np.int8)
+        })
+
+    
+    @functools.lru_cache(maxsize=None)
+    def action_space(self, agent):
+        # [Movement (0-4), Communication Target (0-N)]
+        return spaces.MultiDiscrete([5, len(self.possible_agents) + 1])
 
     # render logic
     def render(self):
         if self.render_mode is None:
             return
 
-        # setup fig
-        fig = plt.figure()
-        fx = max(3.0 / 2.0 * 1.25 * (self.width * 2) / fig.dpi, 24.0)
-        fy = max(1.25 * self.height / fig.dpi, 10.0)
+        # determine layout based on agent number
+        n_agents = len(self.possible_agents)
+        
+        # Grid Ratios and figure size
+        width_ratios = [4] + ([4] * n_agents) + [3.5]
+        num_cols = len(width_ratios)
+
+        base_width_per_col = 5.0 
+        fx = base_width_per_col * num_cols
+        fy = max(1.25 * self.height / 100.0 * 4.0, 10.0) 
+        
         plt.close()
         fig = plt.figure(figsize=(fx, fy))
 
         gs = fig.add_gridspec(
-            ncols=4, nrows=3,
-            width_ratios=(4, 4, 4, 3.5),
+            ncols=num_cols, nrows=3,
+            width_ratios=width_ratios,
             height_ratios=(3, 3, 3),
-            hspace=0.45, wspace=0.4,
+            hspace=0.45, wspace=0.3,
             top=0.95, bottom=0.15,
             left=0.025, right=0.955,
         )
 
         sim_ax = fig.add_subplot(gs[:, 0])
-        rm_a_ax = fig.add_subplot(gs[:, 1])  
-        rm_b_ax = fig.add_subplot(gs[:, 2])  
-        dash_ax = fig.add_subplot(gs[0, 3]) 
-        qoe_ax = fig.add_subplot(gs[1, 3])  
-        conn_ax = fig.add_subplot(gs[2, 3]) 
+        
+        dash_ax = fig.add_subplot(gs[0, -1]) 
+        qoe_ax = fig.add_subplot(gs[1, -1])  
+        conn_ax = fig.add_subplot(gs[2, -1]) 
 
-        # render sim
+        # render sim 
         self.render_simulation(sim_ax)
 
-        # radio maps
-        if "rover_0" in self.agent_map:
-            agent_a = self.agent_map["rover_0"]
-            map_a = self._get_radio_map(agent_a)
-            self.render_radio_map(rm_a_ax, map_a, "Radio Map (Agent A)")
-        
-        if "rover_1" in self.agent_map:
-            agent_b = self.agent_map["rover_1"]
-            map_b = self._get_radio_map(agent_b)
-            self.render_radio_map(rm_b_ax, map_b, "Radio Map (Agent B)")
+        # render radio maps
+        for i, agent_id in enumerate(self.possible_agents):
+            col_idx = i + 1
+            map_ax = fig.add_subplot(gs[:, col_idx])
+            
+            # only render if agent is active
+            if agent_id in self.agent_map:
+                agent = self.agent_map[agent_id]
+                
+                if agent.energy > 0:
+                    radio_map = self._get_radio_map(agent)
+                    
+                    # generate labels
+                    label_char = chr(ord('A') + i) 
+                    self.render_radio_map(map_ax, radio_map, f"Radio Map (Agent {label_char})")
+                else:
+                    map_ax.text(0.5, 0.5, "SIGNAL LOST\n(Dead)", ha='center', va='center')
+                    map_ax.axis('off')
+            else:
+                map_ax.axis('off')
 
-        #  dashboard
         self.render_dashboard(dash_ax)
         self.render_avg_datarate(qoe_ax)
         self.render_avg_energy(conn_ax)
@@ -323,6 +352,34 @@ class LunarRoverMeshEnv(ParallelEnv):
         elif self.render_mode == "human":
             self._render_human(canvas, fig)
 
+    def render_dashboard(self, ax):
+        ax.axis('off')
+        ax.set_title(f"Sim Time: {self.sim_time * self.STEP_LENGTH:.1f} s", fontweight='bold')
+
+        # dynamically generate rows for all possible agents
+        rows = []
+        cell_text = []
+        
+        cols = ["Rate (Mbps)", "Energy", "Dist (m)"]
+
+        for i, agent_id in enumerate(self.possible_agents):
+            label_char = chr(ord('A') + i)
+            rows.append(f"Agent {label_char}")
+
+            if agent_id in self.agent_map:
+                agent = self.agent_map[agent_id]
+                cell_text.append([
+                    f"{agent.current_datarate:.1f}",
+                    f"{agent.energy:.1f}",
+                    f"{agent.total_distance:.1f}"
+                ])
+            else:
+                cell_text.append(["N/A", "Dead", "N/A"])
+
+        table = ax.table(cellText=cell_text, rowLabels=rows, colLabels=cols, 
+                         cellLoc="center", loc="upper center", bbox=[0.0, -0.25, 1.0, 1.25])
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
     def _render_human(self, canvas, fig):
         data = canvas.buffer_rgba()
         size = canvas.get_width_height()
@@ -397,30 +454,6 @@ class LunarRoverMeshEnv(ParallelEnv):
         ax.set_xlim([0, self.width])
         ax.set_ylim([0, self.height])
 
-    def render_dashboard(self, ax):
-        ax.axis('off')
-        ax.set_title(f"Sim Time: {self.sim_time * self.STEP_LENGTH:.1f} s", fontweight='bold')
-
-        rows = ["Agent A", "Agent B", "Agent C"]
-        cols = ["Rate (Mbps)", "Energy", "Dist (m)"]
-        cell_text = []
-
-        target_agents = ["rover_0", "rover_1", "rover_2"]
-        for a_id in target_agents:
-            if a_id in self.agent_map:
-                agent = self.agent_map[a_id]
-                cell_text.append([
-                    f"{agent.current_datarate:.1f}",
-                    f"{agent.energy:.1f}",
-                    f"{agent.total_distance:.1f}"
-                ])
-            else:
-                cell_text.append(["N/A", "Dead", "N/A"])
-
-        table = ax.table(cellText=cell_text, rowLabels=rows, colLabels=cols, 
-                         cellLoc="center", loc="upper center", bbox=[0.0, -0.25, 1.0, 1.25])
-        table.auto_set_font_size(False)
-        table.set_fontsize(10)
 
     def render_avg_datarate(self, ax):
         if len(self.history['datarate']) > 0:

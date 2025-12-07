@@ -49,7 +49,7 @@ def main():
     frames = []
     
     print("Starting simulation...")
-    for step in range(10):
+    for step in range(50):
         # Sample random actions
         # Action format: [Move (0-4), Comm (0-N)]
         actions = {
