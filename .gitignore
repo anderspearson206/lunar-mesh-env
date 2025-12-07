@@ -20,3 +20,5 @@ RadioLunaDiff/train*
 
 examples/run_heuristic.py
 examples/test_marl.py
+
+*.ipynb

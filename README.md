@@ -21,7 +21,7 @@ For older Gymnasium support, see the [legacy-gym branch](https://github.com/ande
 1.  **Clone the Repository:**
 
     ```bash
-    git clone [https://github.com/anderspearson206/lunar-mesh-env.git](https://github.com/anderspearson206/lunar-mesh-env.git)
+    git clone https://github.com/anderspearson206/lunar-mesh-env.git
     cd lunar-mesh-env
     ```
 
