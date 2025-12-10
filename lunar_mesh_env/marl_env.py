@@ -47,7 +47,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.COST_TX_5G_PER_STEP = 1.0
         self.COST_TX_415_PER_STEP = 2.0
         self.COST_IDLE_PER_STEP = 0.1
-        self.EP_MAX_TIME = 100
+        self.EP_MAX_TIME = 300
 
         # agent set up
         self.possible_agents = [f"rover_{i}" for i in range(num_agents)]
@@ -380,26 +380,35 @@ class LunarRoverMeshEnv(ParallelEnv):
                          cellLoc="center", loc="upper center", bbox=[0.0, -0.25, 1.0, 1.25])
         table.auto_set_font_size(False)
         table.set_fontsize(10)
+        
+        
     def _render_human(self, canvas, fig):
-        data = canvas.buffer_rgba()
-        size = canvas.get_width_height()
 
+        data = canvas.buffer_rgba()
+        width, height = canvas.get_width_height()
+        
         if self.window is None:
             pygame.init()
             self.clock = pygame.time.Clock()
-            window_size = tuple(map(int, fig.get_size_inches() * fig.dpi))
-            self.window = pygame.display.set_mode(window_size)
+
+            self.window = pygame.display.set_mode((width+(width/10.0), height))
             pygame.display.set_caption("Lunar Mesh Env (MARL)")
 
+        # We must specify "RGBA" to match matplotlib's buffer_rgba()
+        plot = pygame.image.frombuffer(data, (width, height), "RGBA")
+        
+        # draw
         self.window.fill("white")
-        screen = pygame.display.get_surface()
-        plot = pygame.image.frombuffer(data, size, "RGBA")
-        screen.blit(plot, (0, 0))
+        self.window.blit(plot, (0, 0))
         pygame.display.flip()
         
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.close()
+        #Cap framerate
+        self.clock.tick(self.metadata["render_fps"])
+        
+        # We process events to keep the window responsive, but we 
+        # generally let the Runner script handle the QUIT logic 
+        # to avoid closing the environment mid-step.
+        pygame.event.pump()
 
     def render_simulation(self, ax):
         # terrain
