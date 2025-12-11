@@ -1,4 +1,4 @@
-# entities.py
+# marl_entities.py
 
 import numpy as np
 from typing import List, Dict, Tuple
@@ -47,19 +47,13 @@ class MarlMeshAgent:
     def __str__(self):
         return f"MeshAgent_{self.ue_id}"
 
-    @property
-    def point(self):
-        """
-        Compatibility helper for visualization code that expects a shapely point.
-        Returns a simple object with x and y attributes.
-        """
-        class Point:
-            def __init__(self, x, y): self.x, self.y = x, y
-        return Point(self.x, self.y)
-
-    def get_local_observation(self, env_heightmap: np.ndarray, all_agents: List['MarlMeshAgent']) -> Dict[str, np.ndarray]:
+    def get_local_observation(self, 
+                              env_heightmap: np.ndarray, 
+                              all_agents: List['MarlMeshAgent'],
+                              bs_location: Tuple[float, float]) -> Dict[str, np.ndarray]:
         """
         Generates the agent-centric observation dictionary.
+        Now includes relative position to the Base Station.
         """
         my_state = np.array([
             self.energy, 
@@ -68,13 +62,12 @@ class MarlMeshAgent:
             self.current_datarate
         ], dtype=np.float32)
         
- 
         terrain_obs = env_heightmap.astype(np.float32)
         if len(terrain_obs.shape) == 2:
             terrain_obs = np.expand_dims(terrain_obs, axis=0)
 
+        # gather neighbor relative positions
         neighbor_features = []
-        
         for other in all_agents:
             if other.ue_id == self.ue_id:
                 continue
@@ -90,10 +83,16 @@ class MarlMeshAgent:
 
         neighbors_arr = np.array(neighbor_features, dtype=np.float32)
         
+        # calculate relative vector to the global base station
+        bs_dx = bs_location[0] - self.x
+        bs_dy = bs_location[1] - self.y
+        bs_obs = np.array([bs_dx, bs_dy], dtype=np.float32)
+
         return {
             "self_state": my_state,
             "terrain": terrain_obs,
-            "neighbors": neighbors_arr
+            "neighbors": neighbors_arr,
+            "base_station": bs_obs # Added to dictionary
         }
 
 
@@ -173,7 +172,7 @@ class MarlMeshAgent:
         if dbm_a_c > dbm_thresh:
             return [(self, target_agent)] 
 
-        # check cimple relay
+        # check simple relay
         agent_b = next((a for a in all_agents if a.ue_id == 2), None)
         
         if agent_b is None or agent_b.ue_id == self.ue_id or agent_b.ue_id == target_agent.ue_id:
@@ -187,3 +186,19 @@ class MarlMeshAgent:
             return [(self, agent_b), (agent_b, target_agent)]
 
         return []
+    
+      
+class BaseStation:
+    """
+    A static entity representing the Lander/Base Station.
+    """
+    def __init__(self, x: float, y: float, height: float = 1.0):
+        self.x = x
+        self.y = y
+        self.height = height # bs could be higher than rovers, 
+        # but we'd have to retrain the model for that.
+        # Can we use the 3m height model for BS? used in RLD paper?
+        self.ue_id = "BS_0"  
+
+    def get_position(self) -> Tuple[float, float]:
+        return (self.x, self.y)

@@ -22,3 +22,8 @@ examples/run_heuristic.py
 examples/test_marl.py
 
 *.ipynb
+
+INFO.md
+
+*temp.txt
+
