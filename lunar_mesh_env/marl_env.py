@@ -51,7 +51,13 @@ class LunarRoverMeshEnv(ParallelEnv):
         
         # Reward Config
         self.REWARD_PEER_LINK = 1.0
-        self.REWARD_BS_LINK = 5.0  # Higher reward for connecting to sink
+        self.REWARD_BS_LINK = 5.0 
+        
+        # The rovers know how to reach the goal (preset path)
+        # but since we allow them to leave the path for comms, 
+        # we need to reward them for arriving.
+        self.REWARD_GOAL_ARRIVAL = 100.0 
+        self.REWARD_DIST_SCALE = 2.0     
         self.PENALTY_FAIL = -0.1
 
         # Agent set up
@@ -116,6 +122,17 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent.x = np.random.uniform(0, self.width)
             agent.y = np.random.uniform(0, self.height)
             
+            # generate task, right now it's set to be far
+            # away from initial pos
+            while True:
+                gx = np.random.uniform(0, self.width)
+                gy = np.random.uniform(0, self.height)
+                dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
+                if dist > 50.0:
+                    agent.goal_x = gx
+                    agent.goal_y = gy
+                    break
+            
         self._update_radio_cache_batch()
 
         observations = {a: self._get_obs(a) for a in self.agents}
@@ -134,6 +151,9 @@ class LunarRoverMeshEnv(ParallelEnv):
         # movement logic
         for agent_id, action in actions.items():
             agent = self.agent_map[agent_id]
+            
+            prev_dist = np.sqrt((agent.goal_x - agent.x)**2 + (agent.goal_y - agent.y)**2)
+            
             move_cmd = action[0] 
             
             agent.current_datarate = 0.0 
@@ -161,6 +181,28 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent.energy -= step_energy
             self.total_energy_consumed_step += step_energy
 
+            curr_dist = np.sqrt((agent.goal_x - agent.x)**2 + (agent.goal_y - agent.y)**2)
+            
+            #  dense task reward
+            dist_delta = prev_dist - curr_dist 
+            rewards[agent_id] += dist_delta * self.REWARD_DIST_SCALE
+
+            # sparse task reward
+            if curr_dist < 3.0: 
+                rewards[agent_id] += self.REWARD_GOAL_ARRIVAL
+                
+                # respawn goal
+                while True:
+                    gx = np.random.uniform(0, self.width)
+                    gy = np.random.uniform(0, self.height)
+                    dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
+                    if dist > 50.0:
+                        agent.goal_x = gx
+                        agent.goal_y = gy
+                        break
+            else:
+                infos[agent_id]['task_complete'] = False
+
         self._update_radio_cache_batch()
 
         # comm logic
@@ -171,6 +213,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         bs_target_idx = num_rovers + 1  # The index assigned to BS
 
         for agent_id, action in actions.items():
+            if terminations[agent_id]: continue
+            
             agent = self.agent_map[agent_id]
             target_idx = action[1] 
             
@@ -236,6 +280,24 @@ class LunarRoverMeshEnv(ParallelEnv):
         return observations, rewards, terminations, truncations, infos
 
 
+    def heuristic_move_action(self, agent_id):
+        """
+        Baseline Logic: Returns the movement action index (0-4) that minimizes
+        distance to the goal for the specified agent.
+        """
+        agent = self.agent_map[agent_id]
+        dx = agent.goal_x - agent.x
+        dy = agent.goal_y - agent.y
+        
+        # Simple greedy choice
+        
+        if abs(dx) > abs(dy):
+            if dx > 0: return 4 # East
+            else: return 3 # West
+        else:
+            if dy > 0: return 1 # North
+            else: return 2 # South
+
     def _update_radio_cache_batch(self):
         """
         Updates the radio maps for all active agents in a single batch.
@@ -298,8 +360,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         agent = self.agent_map[agent_id]
         all_agents = list(self.agent_map.values())
         bs_loc = self.base_station.get_position()
-        obs_dict = agent.get_local_observation(self.heightmap, all_agents, bs_loc)
-        
+        current_rm = self._get_cached_radio_map(agent)
+        obs_dict = agent.get_local_observation(self.heightmap, all_agents, bs_loc, current_rm)
         if len(obs_dict['terrain'].shape) == 2:
             obs_dict['terrain'] = np.expand_dims(obs_dict['terrain'], axis=0)
         return obs_dict
@@ -317,6 +379,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             "neighbors": spaces.Box(low=-np.inf, high=np.inf, shape=(num_neighbors, 2), dtype=np.float32),
             "base_station": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             "radio_map": spaces.Box(low=-200, high=0, shape=(1, int(self.height), int(self.width)), dtype=np.float32),
+            "goal_vector": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32), # NEW
             "action_mask": spaces.Box(low=0, high=1, shape=(mask_dim,), dtype=np.int8)
         })
 
@@ -326,56 +389,40 @@ class LunarRoverMeshEnv(ParallelEnv):
         # Total comm options: 1 + N + 1 = N + 2
         return spaces.MultiDiscrete([5, len(self.possible_agents) + 2])
 
-    # render logic
     def render(self):
-        if self.render_mode is None:
-            return
+        if self.render_mode is None: return
 
-        # determine layout based on agent number
         n_agents = len(self.possible_agents)
-        
-        # Grid Ratios and figure size
         width_ratios = [4] + ([4] * n_agents) + [3.5]
         num_cols = len(width_ratios)
-
-        base_width_per_col = 5.0 
-        fx = base_width_per_col * num_cols
-        fy = max(1.25 * self.height / 100.0 * 4.0, 10.0) 
+        fx = 5.0 * num_cols
+        fy = max(1.25 * self.height / 100.0 * 4.0, 10.0)
         
         plt.close()
         fig = plt.figure(figsize=(fx, fy), dpi=50)
 
         gs = fig.add_gridspec(
             ncols=num_cols, nrows=3,
-            width_ratios=width_ratios,
-            height_ratios=(3, 3, 3),
-            hspace=0.45, wspace=0.4,
-            top=0.95, bottom=0.15,
-            left=0.025, right=0.955,
+            width_ratios=width_ratios, height_ratios=(3, 3, 3),
+            hspace=0.45, wspace=0.6,
+            top=0.95, bottom=0.15, left=0.025, right=0.955,
         )
 
         sim_ax = fig.add_subplot(gs[:, 0])
-        
         dash_ax = fig.add_subplot(gs[0, -1]) 
         qoe_ax = fig.add_subplot(gs[1, -1])  
         conn_ax = fig.add_subplot(gs[2, -1]) 
 
-        # render sim 
         self.render_simulation(sim_ax)
 
         # render radio maps
         for i, agent_id in enumerate(self.possible_agents):
             col_idx = i + 1
             map_ax = fig.add_subplot(gs[:, col_idx])
-            
-            # only render if agent is active
             if agent_id in self.agent_map:
                 agent = self.agent_map[agent_id]
-                
                 if agent.energy > 0:
                     radio_map = self._get_cached_radio_map(agent)
-                    
-                    # generate labels
                     label_char = chr(ord('A') + i) 
                     self.render_radio_map(map_ax, radio_map, f"Radio Map (Agent {label_char})")
                 else:
@@ -398,6 +445,47 @@ class LunarRoverMeshEnv(ParallelEnv):
             return data.reshape(canvas.get_width_height()[::-1] + (3,))
         elif self.render_mode == "human":
             self._render_human(canvas, fig)
+
+    def render_simulation(self, ax):
+        if self.heightmap is not None:
+            ax.imshow(self.heightmap, cmap='terrain', extent=[0, self.width, 0, self.height], origin='lower', zorder=0)
+
+        #draw bs
+        ax.scatter(self.base_station.x, self.base_station.y, s=300, c='cyan', marker='^', edgecolors='black', zorder=3, label="Base Station")
+        ax.annotate("BS", xy=(self.base_station.x, self.base_station.y), xytext=(0, 10), textcoords='offset points', ha='center', color='cyan', fontweight='bold')
+
+        # draw agents and goals
+        for agent_id, agent in self.agent_map.items():
+            if agent.energy <= 0: continue
+            
+            color = 'gray'
+            if agent_id == "rover_0": color = 'blue'
+            elif agent_id == "rover_1": color = 'purple'
+            elif agent_id == "rover_2": color = 'green'
+
+            # agent
+            ax.scatter(agent.x, agent.y, s=200, zorder=2, color=color, marker="o")
+            
+            # goal
+            ax.scatter(agent.goal_x, agent.goal_y, s=200, zorder=1, color=color, marker="x", linewidth=3)
+
+            ax.plot([agent.x, agent.goal_x], [agent.y, agent.goal_y], color=color, linestyle='--', alpha=0.5, zorder=1)
+
+            label_map = {"rover_0": "A", "rover_1": "B", "rover_2": "C"}
+            label = label_map.get(agent_id, agent_id[-1])
+            ax.annotate(label, xy=(agent.x, agent.y), ha="center", va="center", color='white', fontweight='bold')
+
+        # links
+        for (u, v), color in self.custom_links.items():
+            vx, vy = v.x, v.y 
+            ax.plot([u.x, vx], [u.y, vy], color=color, 
+                    path_effects=[pe.SimpleLineShadow(shadow_color="black"), pe.Normal()],
+                    linewidth=3, zorder=1)
+
+        ax.axis('off')
+        ax.set_xlim([0, self.width])
+        ax.set_ylim([0, self.height])
+
 
     def render_dashboard(self, ax):
         ax.axis('off')
@@ -457,44 +545,6 @@ class LunarRoverMeshEnv(ParallelEnv):
         # to avoid closing the environment mid-step.
         pygame.event.pump()
 
-    def render_simulation(self, ax):
-        # terrain
-        if self.heightmap is not None:
-            ax.imshow(self.heightmap, cmap='terrain', extent=[0, self.width, 0, self.height], origin='lower', zorder=0)
-
-        # draw bs
-        
-        ax.scatter(self.base_station.x, self.base_station.y, s=300, c='cyan', marker='^', edgecolors='black', zorder=3, label="Base Station")
-        ax.annotate("BS", xy=(self.base_station.x, self.base_station.y), xytext=(0, 10), 
-                    textcoords='offset points', ha='center', color='cyan', fontweight='bold')
-
-        # agents
-        for agent_id, agent in self.agent_map.items():
-            if agent.energy <= 0: continue
-            
-            color = 'gray'
-            if agent_id == "rover_0": color = 'blue'
-            elif agent_id == "rover_1": color = 'purple'
-            elif agent_id == "rover_2": color = 'green'
-
-            ax.scatter(agent.x, agent.y, s=200, zorder=2, color=color, marker="o")
-            
-            label_map = {"rover_0": "A", "rover_1": "B", "rover_2": "C"}
-            label = label_map.get(agent_id, agent_id[-1])
-            ax.annotate(label, xy=(agent.x, agent.y), ha="center", va="center", color='white', fontweight='bold')
-
-        # draw links
-        for (u, v), color in self.custom_links.items():
-            # check if v is an agent or the BS object
-            vx, vy = v.x, v.y 
-            
-            ax.plot([u.x, vx], [u.y, vy], color=color, 
-                    path_effects=[pe.SimpleLineShadow(shadow_color="black"), pe.Normal()],
-                    linewidth=3, zorder=1)
-
-        ax.axis('off')
-        ax.set_xlim([0, self.width])
-        ax.set_ylim([0, self.height])
         
     def render_radio_map(self, ax, radio_map, title):
         ax.set_title(title)

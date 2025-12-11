@@ -19,6 +19,9 @@ class MarlMeshAgent:
         self.x = x
         self.y = y
         
+        self.goal_x: float = 0.0
+        self.goal_y: float = 0.0
+        
         # sim state
         self.active_route = None 
         self.current_datarate = 0.0
@@ -83,12 +86,18 @@ class MarlMeshAgent:
         bs_dx = bs_location[0] - self.x
         bs_dy = bs_location[1] - self.y
         bs_obs = np.array([bs_dx, bs_dy], dtype=np.float32)
+        
+        # goal vector
+        goal_dx = self.goal_x - self.x
+        goal_dy = self.goal_y - self.y
+        goal_obs = np.array([goal_dx, goal_dy], dtype=np.float32)
 
         return {
             "self_state": my_state,
             "terrain": terrain_obs,
             "neighbors": neighbors_arr,
             "base_station": bs_obs,
+            "goal_vector": goal_obs,
             "radio_map": rm_obs
         }
 
