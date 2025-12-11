@@ -1,5 +1,3 @@
-# marl_entities.py
-
 import numpy as np
 from typing import List, Dict, Tuple
 
@@ -13,29 +11,13 @@ class MarlMeshAgent:
     """
     def __init__(self,
                  ue_id: int,
-                 velocity: float,
-                 snr_tr: float,
-                 noise: float,
-                 height: float,
-                 frequency: float, 
-                 tx_power: float,   
-                 bw: float):       
+                 x: float = 0.0,
+                 y: float = 0.0):        
         
         self.ue_id = ue_id
-        self.velocity = velocity
-        self.height = height
-        
         # position (initialize at 0, will be set by env.reset)
-        self.x: float = 0.0
-        self.y: float = 0.0
-        
-        # radio properties
-        self.snr_tr = snr_tr
-        self.noise = noise
-        self.frequency = frequency
-        self.tx_power = tx_power
-        self.bw = bw
-        self.snr_threshold = snr_tr
+        self.x = x
+        self.y = y
         
         # sim state
         self.active_route = None 
@@ -50,10 +32,16 @@ class MarlMeshAgent:
     def get_local_observation(self, 
                               env_heightmap: np.ndarray, 
                               all_agents: List['MarlMeshAgent'],
-                              bs_location: Tuple[float, float]) -> Dict[str, np.ndarray]:
+                              bs_location: Tuple[float, float],
+                              radio_map: np.ndarray = None) -> Dict[str, np.ndarray]:
         """
         Generates the agent-centric observation dictionary.
-        Now includes relative position to the Base Station.
+        Now includes:
+        1. Self State
+        2. Terrain (Global)
+        3. Neighbor Relative Positions
+        4. Base Station Relative Position
+        5. Radio Map (Self-Predicted Connectivity)
         """
         my_state = np.array([
             self.energy, 
@@ -66,7 +54,16 @@ class MarlMeshAgent:
         if len(terrain_obs.shape) == 2:
             terrain_obs = np.expand_dims(terrain_obs, axis=0)
 
-        # gather neighbor relative positions
+        # rm obs
+        if radio_map is None:
+            # Assuming square map matching terrain size
+            rm_obs = np.zeros_like(terrain_obs)
+        else:
+            rm_obs = radio_map.astype(np.float32)
+            if len(rm_obs.shape) == 2:
+                rm_obs = np.expand_dims(rm_obs, axis=0)
+
+        # get neighbor relative positions
         neighbor_features = []
         for other in all_agents:
             if other.ue_id == self.ue_id:
@@ -77,13 +74,12 @@ class MarlMeshAgent:
             dy = other.y - self.y
             neighbor_features.append([dx, dy])
         
-        # if no neighbors (single agent dev), pad with zeros
         if len(neighbor_features) == 0:
             neighbor_features = [[0.0, 0.0]]
 
         neighbors_arr = np.array(neighbor_features, dtype=np.float32)
         
-        # calculate relative vector to the global base station
+        # Base station vector
         bs_dx = bs_location[0] - self.x
         bs_dy = bs_location[1] - self.y
         bs_obs = np.array([bs_dx, bs_dy], dtype=np.float32)
@@ -92,7 +88,8 @@ class MarlMeshAgent:
             "self_state": my_state,
             "terrain": terrain_obs,
             "neighbors": neighbors_arr,
-            "base_station": bs_obs # Added to dictionary
+            "base_station": bs_obs,
+            "radio_map": rm_obs
         }
 
 

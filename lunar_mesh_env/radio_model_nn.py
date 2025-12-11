@@ -206,6 +206,7 @@ class RadioMapModelNN:
             static_hm_batch = self.static_hm_tensor.unsqueeze(0).expand(batch_size, -1, -1)
             static_fhm_batch = self.static_fhm_tensor.unsqueeze(0).expand(batch_size, -1, -1)
 
+            # stack inputs: shape (B, 4, 256, 256)
             unnorm_inputs = torch.stack([
                 static_hm_batch, 
                 tx_maps, 
@@ -213,23 +214,25 @@ class RadioMapModelNN:
                 static_fhm_batch
             ], dim=1)
 
-            k2_inputs = self.normalize_transform(unnorm_inputs)
-            pm_inputs = k2_inputs.clone()
+            # K2 and PMNet expect inputs in [0, 1]
+            k2_inputs = unnorm_inputs.clone()
+            pm_inputs = unnorm_inputs.clone()
             
-            conditioning_maps = k2_inputs 
+            # only diffusion conditioning maps expect [-1, 1]
+            conditioning_maps = self.normalize_transform(unnorm_inputs.clone())
             
-            # K2Net
+            # K2Net 
             k2_map_pred = torch.sigmoid(self.k2_model(k2_inputs))
             
-            # PMNet
+            # PMNet 
             pm_inputs_cat = torch.cat([pm_inputs, k2_map_pred.clone()], dim=1)
             pm_pred = self.pmnet(pm_inputs_cat)
 
-            # normalize intermediates
+            # normalize PM and K2 maps for diffusion
             pm_pred_norm = self.normalize_transform_single(pm_pred)
             k2_map_norm = self.normalize_transform_single(k2_map_pred)
             
-            # diffusion loop
+            # Diffusion loop
             generated_images = torch.randn(
                 (batch_size, 1, self.image_size, self.image_size),
                 device=self.device
@@ -237,10 +240,10 @@ class RadioMapModelNN:
             
             for t in self.noise_scheduler.timesteps:
                 model_input = torch.cat([
-                    generated_images,       
-                    conditioning_maps,      
-                    pm_pred_norm,           
-                    k2_map_norm             
+                    generated_images,        
+                    conditioning_maps,       
+                    pm_pred_norm,            
+                    k2_map_norm              
                 ], dim=1)
 
                 noise_pred = self.model(model_input, t, return_dict=False)[0]
@@ -254,6 +257,8 @@ class RadioMapModelNN:
             
             output_map_0_1 = final_gen_0_1.squeeze(1).cpu().numpy()
             
+            # convert back to correct range based on oriinal training
+            # dataloaders
             output_dbm = (output_map_0_1 * 210.0) - 200.0
             
             return output_dbm

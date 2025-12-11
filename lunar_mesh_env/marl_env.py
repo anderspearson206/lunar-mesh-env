@@ -62,11 +62,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         # bridges petting zoo agent_id to actual agent object
         self.agent_map = {}
         for i, agent_id in enumerate(self.agents):
-            self.agent_map[agent_id] = MeshAgent(
-                ue_id=i+1, 
-                velocity=10, snr_tr=20, noise=10, height=1.5, 
-                frequency=5.8, tx_power=23, bw=20
-            )
+            self.agent_map[agent_id] = MeshAgent(ue_id=i+1)
 
         self.base_station = BaseStation(x=0.0, y=0.0)
 
@@ -119,6 +115,8 @@ class LunarRoverMeshEnv(ParallelEnv):
             
             agent.x = np.random.uniform(0, self.width)
             agent.y = np.random.uniform(0, self.height)
+            
+        self._update_radio_cache_batch()
 
         observations = {a: self._get_obs(a) for a in self.agents}
         infos = {a: {} for a in self.agents}
@@ -163,6 +161,8 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent.energy -= step_energy
             self.total_energy_consumed_step += step_energy
 
+        self._update_radio_cache_batch()
+
         # comm logic
         self.connections = defaultdict(set) 
         self.custom_links = {} 
@@ -190,7 +190,7 @@ class LunarRoverMeshEnv(ParallelEnv):
 
             # link check
             if target_entity:
-                radio_map = self._get_radio_map(agent)
+                radio_map = self._get_cached_radio_map(agent)
                 rssi = self._get_signal_strength(radio_map, target_entity)
                 
                 # threshold check
@@ -236,6 +236,44 @@ class LunarRoverMeshEnv(ParallelEnv):
         return observations, rewards, terminations, truncations, infos
 
 
+    def _update_radio_cache_batch(self):
+        """
+        Updates the radio maps for all active agents in a single batch.
+        Checks cache first to avoid re-generating maps for stationary agents.
+        """
+        if not self.radio_model:
+            return
+
+        needed_indices = []
+        needed_positions = []
+        needed_ids = []
+
+        # find which agents need new maps
+        for agent_id in self.agents:
+            agent = self.agent_map[agent_id]
+            
+            key = (int(agent.x), int(agent.y), '5.8') 
+            
+            if key not in self.radio_cache:
+                needed_ids.append(agent_id)
+                needed_positions.append((agent.x, agent.y))
+
+        # batch inference
+        if len(needed_positions) > 0:
+            new_maps = self.radio_model.generate_map_batch(needed_positions, '5.8')
+            
+            # update cache
+            for i, agent_id in enumerate(needed_ids):
+                agent = self.agent_map[agent_id]
+                key = (int(agent.x), int(agent.y), '5.8')
+                self.radio_cache[key] = new_maps[i]
+
+    def _get_cached_radio_map(self, agent):
+        """Retrieves map from cache. Assumes _update_radio_cache_batch was called."""
+        grid_pos = (int(agent.x), int(agent.y), '5.8')
+        return self.radio_cache.get(grid_pos, None)
+
+
     def _get_radio_map(self, agent):
         """Cached Neural Network Inference"""
         grid_pos = (int(agent.x), int(agent.y), '5.8') 
@@ -278,6 +316,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             "terrain": spaces.Box(low=0, high=1, shape=(1, int(self.height), int(self.width)), dtype=np.float32),
             "neighbors": spaces.Box(low=-np.inf, high=np.inf, shape=(num_neighbors, 2), dtype=np.float32),
             "base_station": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
+            "radio_map": spaces.Box(low=-200, high=0, shape=(1, int(self.height), int(self.width)), dtype=np.float32),
             "action_mask": spaces.Box(low=0, high=1, shape=(mask_dim,), dtype=np.int8)
         })
 
@@ -310,7 +349,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             ncols=num_cols, nrows=3,
             width_ratios=width_ratios,
             height_ratios=(3, 3, 3),
-            hspace=0.45, wspace=0.3,
+            hspace=0.45, wspace=0.4,
             top=0.95, bottom=0.15,
             left=0.025, right=0.955,
         )
@@ -334,7 +373,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                 agent = self.agent_map[agent_id]
                 
                 if agent.energy > 0:
-                    radio_map = self._get_radio_map(agent)
+                    radio_map = self._get_cached_radio_map(agent)
                     
                     # generate labels
                     label_char = chr(ord('A') + i) 
@@ -402,7 +441,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             self.window = pygame.display.set_mode((width+(width/10.0), height))
             pygame.display.set_caption("Lunar Mesh Env (MARL)")
 
-        # We must specify "RGBA" to match matplotlib's buffer_rgba()
+        # specify RGBA for conversion from matplotlib
         plot = pygame.image.frombuffer(data, (width, height), "RGBA")
         
         # draw
