@@ -61,7 +61,7 @@ def main():
     env = LunarRoverMeshEnv(
         hm_path=HM_PATH,
         radio_model=radio_model,
-        num_agents=3, 
+        num_agents=2, 
         render_mode="rgb_array" 
     )
     
@@ -70,9 +70,9 @@ def main():
     
     print("\n--- Starting Simulation ---")
     print(f"Agents: {env.possible_agents}")
-    print("Goal: Rovers will navigate to randomly assigned tasks (Red X).")
+    print("Goal: Rovers will navigate to randomly assigned tasks (task marked as X).")
     
-    SIM_STEPS = 15
+    SIM_STEPS = 30
     
     for step in range(SIM_STEPS):
         

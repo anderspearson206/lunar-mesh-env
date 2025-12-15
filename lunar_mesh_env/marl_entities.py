@@ -25,9 +25,12 @@ class MarlMeshAgent:
         # sim state
         self.active_route = None 
         self.current_datarate = 0.0
-        self.energy = 1000.0 
+        self.energy = 2000.0 
         self.is_moving = False 
         self.total_distance = 0.0
+        
+        # pathfinding state
+        self.nav_path: List[Tuple[int, int]] = []
 
     def __str__(self):
         return f"MeshAgent_{self.ue_id}"

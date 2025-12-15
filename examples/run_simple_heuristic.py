@@ -137,7 +137,7 @@ def main():
     env = LunarRoverMeshEnv(
         hm_path=HM_PATH,
         radio_model=radio_model,
-        num_agents=4,
+        num_agents=2,
         render_mode="rgb_array"
     )
     
@@ -146,7 +146,7 @@ def main():
     
     print("Starting simulation...")
     
-    SIM_STEPS = 10
+    SIM_STEPS = 3
     
     for step in range(SIM_STEPS):
         
@@ -160,7 +160,7 @@ def main():
         frame = env.render()
         frames.append(frame)
         
-        if step % 10 == 0:
+        if step % 1 == 0:
             avg_rew = sum(rewards.values()) / len(rewards)
             print(f"Step {step}: Avg Reward: {avg_rew:.2f} | Action Ex: {actions['rover_0']}")
             

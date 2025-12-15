@@ -15,6 +15,7 @@ from collections import defaultdict
 
 from .marl_entities import MarlMeshAgent as MeshAgent, BaseStation
 from .radio_model_nn import RadioMapModelNN
+from .pathfinding import a_star_search
 
 class LunarRoverMeshEnv(ParallelEnv):
     metadata = {
@@ -37,9 +38,13 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.width = 256.0 
         self.height = 256.0
         self.ROVER_SPEED = 0.2
-        self.STEP_LENGTH = 25.0
+        self.STEP_LENGTH = 20.0
         self.METERS_PER_PIXEL = 1.0
         self.MAX_DIST_PER_STEP = (self.ROVER_SPEED * self.STEP_LENGTH) / self.METERS_PER_PIXEL
+        
+        # restricts movement on steep inclines
+        self.MAX_INCLINE_PER_STEP = self.MAX_DIST_PER_STEP * 0.6
+        
         
         # Energy & Rewards
         self.START_ENERGY = 1000.0
@@ -59,6 +64,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.REWARD_GOAL_ARRIVAL = 100.0 
         self.REWARD_DIST_SCALE = 2.0     
         self.PENALTY_FAIL = -0.1
+        self.PENALTY_INVALID_MOVE = -1.0 
 
         # Agent set up
         # petting zoo style 
@@ -111,6 +117,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.base_station.x = new_bs_x
         self.base_station.y = new_bs_y
         
+        safety_factor = 0.85 
+        per_pixel_threshold = (self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)) * safety_factor
         # reset agent states
         for agent_id in self.agents:
             agent = self.agent_map[agent_id]
@@ -124,14 +132,30 @@ class LunarRoverMeshEnv(ParallelEnv):
             
             # generate task, right now it's set to be far
             # away from initial pos
-            while True:
+            max_retries = 100
+            for _ in range(max_retries):
+
+                # agent start
+                agent.x = np.random.uniform(0, self.width)
+                agent.y = np.random.uniform(0, self.height)
+                
+                # goal
                 gx = np.random.uniform(0, self.width)
                 gy = np.random.uniform(0, self.height)
+                
                 dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
+                
                 if dist > 50.0:
-                    agent.goal_x = gx
-                    agent.goal_y = gy
-                    break
+                    # make sure there is valid path to goal
+                    start_node = (int(agent.x), int(agent.y))
+                    end_node = (int(gx), int(gy))
+                    path = a_star_search(self.heightmap, start_node, end_node, per_pixel_threshold)
+                    
+                    if path:
+                        agent.goal_x = gx
+                        agent.goal_y = gy
+                        agent.nav_path = path 
+                        break
             
         self._update_radio_cache_batch()
 
@@ -147,34 +171,68 @@ class LunarRoverMeshEnv(ParallelEnv):
         infos = {a: {} for a in self.agents}
         
         self.total_energy_consumed_step = 0.0
-
-        # movement logic
+        
+        per_pixel_threshold = self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)
+        
+        # movement update
         for agent_id, action in actions.items():
             agent = self.agent_map[agent_id]
             
+            # follow path to objective
+            if agent.nav_path and len(agent.nav_path) > 1:
+                # only look at the next 15 nodes to find closest
+                search_window = agent.nav_path[:self.MAX_DIST_PER_STEP*2] 
+
+                dists = [np.sqrt((n[0]-agent.x)**2 + (n[1]-agent.y)**2) for n in search_window]
+                
+                closest_idx = np.argmin(dists)
+                
+                # remove passed nodes
+                if closest_idx > 0:
+                    agent.nav_path = agent.nav_path[closest_idx:]
+
             prev_dist = np.sqrt((agent.goal_x - agent.x)**2 + (agent.goal_y - agent.y)**2)
             
             move_cmd = action[0] 
-            
             agent.current_datarate = 0.0 
             
             dx, dy = 0, 0
-            if move_cmd == 1: dy = 1 
-            elif move_cmd == 2: dy = -1
-            elif move_cmd == 3: dx = -1
-            elif move_cmd == 4: dx = 1
+            
+            # cardinal directions
+            if move_cmd == 1: dy = 1        # North
+            elif move_cmd == 2: dy = -1     # South
+            elif move_cmd == 3: dx = -1     # West
+            elif move_cmd == 4: dx = 1      # East
+            
+            # diagonals
+            elif move_cmd == 5: dx, dy = 0.707, 0.707   # NE
+            elif move_cmd == 6: dx, dy = -0.707, 0.707  # NW
+            elif move_cmd == 7: dx, dy = 0.707, -0.707  # SE
+            elif move_cmd == 8: dx, dy = -0.707, -0.707 # SW
             
             step_energy = 0.0
             
             if dx != 0 or dy != 0:
                 dist = np.sqrt(dx**2 + dy**2)
                 scale = self.MAX_DIST_PER_STEP / dist
-                new_x = np.clip(agent.x + dx*scale, 0, self.width)
-                new_y = np.clip(agent.y + dy*scale, 0, self.height)
+                new_x = np.clip(agent.x + dx*scale, 0, self.width - 1)
+                new_y = np.clip(agent.y + dy*scale, 0, self.height - 1)
                 
-                agent.x, agent.y = new_x, new_y
-                agent.total_distance += self.MAX_DIST_PER_STEP
-                step_energy = self.COST_MOVE_PER_STEP
+                # slope check
+                current_z = self.heightmap[int(agent.y), int(agent.x)]
+                target_z = self.heightmap[int(new_y), int(new_x)]
+                height_diff = target_z - current_z
+                
+                if height_diff > self.MAX_INCLINE_PER_STEP:
+                    # blocked
+                    rewards[agent_id] += self.PENALTY_INVALID_MOVE
+                    step_energy = self.COST_IDLE_PER_STEP 
+                else:
+                    #  allowed
+                    agent.x, agent.y = new_x, new_y
+                    agent.total_distance += self.MAX_DIST_PER_STEP
+                    incline_cost = max(0, height_diff * 0.5) 
+                    step_energy = self.COST_MOVE_PER_STEP + incline_cost
             else:
                 step_energy = self.COST_IDLE_PER_STEP
             
@@ -183,34 +241,45 @@ class LunarRoverMeshEnv(ParallelEnv):
 
             curr_dist = np.sqrt((agent.goal_x - agent.x)**2 + (agent.goal_y - agent.y)**2)
             
-            #  dense task reward
+            # dense reward for getting closer
+            # reward function has not been tuned extensively
+            # so this could be changed later
             dist_delta = prev_dist - curr_dist 
             rewards[agent_id] += dist_delta * self.REWARD_DIST_SCALE
 
-            # sparse task reward
-            if curr_dist < 3.0: 
+            # arrival logic
+            if curr_dist < self.MAX_DIST_PER_STEP: 
                 rewards[agent_id] += self.REWARD_GOAL_ARRIVAL
+                infos[agent_id]['task_complete'] = True
                 
-                # respawn goal
-                while True:
+                # respawn
+                max_retries = 20
+                for _ in range(max_retries):
                     gx = np.random.uniform(0, self.width)
                     gy = np.random.uniform(0, self.height)
                     dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
+                    
                     if dist > 50.0:
-                        agent.goal_x = gx
-                        agent.goal_y = gy
-                        break
+                        start_node = (int(agent.x), int(agent.y))
+                        end_node = (int(gx), int(gy))
+                        path = a_star_search(self.heightmap, start_node, end_node, per_pixel_threshold)
+                        
+                        if path:
+                            agent.goal_x = gx
+                            agent.goal_y = gy
+                            agent.nav_path = path
+                            break
             else:
                 infos[agent_id]['task_complete'] = False
 
         self._update_radio_cache_batch()
 
-        # comm logic
+        # comms
         self.connections = defaultdict(set) 
         self.custom_links = {} 
         
         num_rovers = len(self.agents)
-        bs_target_idx = num_rovers + 1  # The index assigned to BS
+        bs_target_idx = num_rovers + 1 
 
         for agent_id, action in actions.items():
             if terminations[agent_id]: continue
@@ -221,37 +290,28 @@ class LunarRoverMeshEnv(ParallelEnv):
             target_entity = None
             is_bs = False
 
-            # check if target is a Rover
             if 0 < target_idx <= num_rovers:
                 target_str = self.possible_agents[target_idx - 1]
                 if target_str != agent_id:
                     target_entity = self.agent_map[target_str]
-            
-            # check if target is BS
             elif target_idx == bs_target_idx:
                 target_entity = self.base_station 
                 is_bs = True
 
-            # link check
             if target_entity:
                 radio_map = self._get_cached_radio_map(agent)
                 rssi = self._get_signal_strength(radio_map, target_entity)
                 
-                # threshold check
                 if rssi > -90.0: 
                     self.connections[agent].add(target_entity)
-                    
-                    # Reward differentiation between bs and peer links
                     if is_bs:
                         rewards[agent_id] += self.REWARD_BS_LINK
                         self.custom_links[(agent, target_entity)] = 'cyan' 
-                        agent.current_datarate = 500.0 # higher rate at BS?
+                        agent.current_datarate = 500.0 
                     else:
                         rewards[agent_id] += self.REWARD_PEER_LINK
-                        self.custom_links[(agent, target_entity)] = 'green' # Peer link color
+                        self.custom_links[(agent, target_entity)] = 'green'
                         agent.current_datarate = 100.0
-
-                    # Energy cost
                     tx_cost = self.COST_TX_5G_PER_STEP
                     agent.energy -= tx_cost
                     self.total_energy_consumed_step += tx_cost
@@ -259,11 +319,12 @@ class LunarRoverMeshEnv(ParallelEnv):
                 else:
                     rewards[agent_id] += self.PENALTY_FAIL 
 
-        # metrics and clean up
+        # metrics & termination checks
         self.sim_time += 1
         global_truncate = self.sim_time >= self.EP_MAX_TIME
 
-        avg_datarate = np.mean([self.agent_map[a].current_datarate for a in self.agents])
+        active_datarates = [self.agent_map[a].current_datarate for a in self.agents if not terminations[a]]
+        avg_datarate = np.mean(active_datarates) if active_datarates else 0.0
         self.history['datarate'].append(avg_datarate)
         self.history['energy'].append(self.total_energy_consumed_step)
         
@@ -279,25 +340,54 @@ class LunarRoverMeshEnv(ParallelEnv):
         
         return observations, rewards, terminations, truncations, infos
 
-
     def heuristic_move_action(self, agent_id):
         """
-        Baseline Logic: Returns the movement action index (0-4) that minimizes
-        distance to the goal for the specified agent.
+        picks movement action based on pure pursuit to follow the precomputed path
         """
         agent = self.agent_map[agent_id]
-        dx = agent.goal_x - agent.x
-        dy = agent.goal_y - agent.y
         
-        # Simple greedy choice
+        if not agent.nav_path or len(agent.nav_path) < 2:
+            return 0 
         
-        if abs(dx) > abs(dy):
-            if dx > 0: return 4 # East
-            else: return 3 # West
-        else:
-            if dy > 0: return 1 # North
-            else: return 2 # South
+        # path is in pixel coords, but our actions are in directions
+        # so we need to find the next target node along the path
+        step_capacity = int(self.MAX_DIST_PER_STEP)
+        safe_lookahead = max(1, step_capacity - 2)
+        lookahead = min(len(agent.nav_path) - 1, safe_lookahead) 
+        
+        # Scan forward if needed (Pure Pursuit logic from previous step)
+        lookahead_radius = self.MAX_DIST_PER_STEP * 1.1
+        target_node = agent.nav_path[-1]
+        for node in agent.nav_path:
+            d_sq = (node[0] - agent.x)**2 + (node[1] - agent.y)**2
+            if d_sq > lookahead_radius**2:
+                target_node = node
+                break
 
+        # get vector to target
+        tx, ty = target_node
+        dx = tx - agent.x
+        dy = ty - agent.y
+        
+        # determine angle
+        angle = np.arctan2(dy, dx)
+        
+        sector_idx = int(np.round(angle / (np.pi / 4))) % 8
+        
+        # map sector to action
+        map_sector_to_action = {
+            0: 4, # East
+            1: 5, # NE
+            2: 1, # North
+            3: 6, # NW
+            4: 3, # West
+            5: 8, # SW
+            6: 2, # South
+            7: 7  # SE
+        }
+        
+        return map_sector_to_action.get(sector_idx, 0)
+    
     def _update_radio_cache_batch(self):
         """
         Updates the radio maps for all active agents in a single batch.
@@ -385,9 +475,11 @@ class LunarRoverMeshEnv(ParallelEnv):
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent):
-        # [Movement (0-4), Communication Target (0 = None, 1..N = Rovers, N+1 = BS)]
-        # Total comm options: 1 + N + 1 = N + 2
-        return spaces.MultiDiscrete([5, len(self.possible_agents) + 2])
+        # [Movement (0-8), Communication Target]
+        # 0: Idle
+        # 1-4: N, S, W, E
+        # 5-8: NE, NW, SE, SW
+        return spaces.MultiDiscrete([9, len(self.possible_agents) + 2])
 
     def render(self):
         if self.render_mode is None: return
@@ -469,8 +561,12 @@ class LunarRoverMeshEnv(ParallelEnv):
             # goal
             ax.scatter(agent.goal_x, agent.goal_y, s=200, zorder=1, color=color, marker="x", linewidth=3)
 
-            ax.plot([agent.x, agent.goal_x], [agent.y, agent.goal_y], color=color, linestyle='--', alpha=0.5, zorder=1)
-
+            if agent.nav_path and len(agent.nav_path) > 1:
+                path_x = [p[0] for p in agent.nav_path]
+                path_y = [p[1] for p in agent.nav_path]
+                ax.plot(path_x, path_y, color=color, linestyle='-', linewidth=1, alpha=0.6, zorder=1)
+                
+                
             label_map = {"rover_0": "A", "rover_1": "B", "rover_2": "C"}
             label = label_map.get(agent_id, agent_id[-1])
             ax.annotate(label, xy=(agent.x, agent.y), ha="center", va="center", color='white', fontweight='bold')
