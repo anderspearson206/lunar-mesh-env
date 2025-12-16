@@ -181,7 +181,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             # follow path to objective
             if agent.nav_path and len(agent.nav_path) > 1:
                 # only look at the next 15 nodes to find closest
-                search_window = agent.nav_path[:self.MAX_DIST_PER_STEP*2] 
+                search_window = agent.nav_path[:int(self.MAX_DIST_PER_STEP*2)] 
 
                 dists = [np.sqrt((n[0]-agent.x)**2 + (n[1]-agent.y)**2) for n in search_window]
                 
@@ -491,7 +491,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         fy = max(1.25 * self.height / 100.0 * 4.0, 10.0)
         
         plt.close()
-        fig = plt.figure(figsize=(fx, fy), dpi=50)
+        fig = plt.figure(figsize=(fx, fy), dpi=65)
 
         gs = fig.add_gridspec(
             ncols=num_cols, nrows=3,
