@@ -1,14 +1,22 @@
 # lunar-mesh-env
 
-A custom [Gymnasium](https://gymnasium.farama.org/)-compatible environment for simulating agent based lunar mesh networks. This environment is built on [mobile-env](https://github.com/j-schuer/mobile-env) but is for mesh netowkrs
+A custom [PettingZoo](https://pettingzoo.farama.org/)-compatible environment for Multi-Agent Reinforcement Learning (MARL) on the lunar surface.
 
-The simulation focuses on a small number of agents (rovers) in a lunar-like terrain, where they must establish communication routes using multiple frequencies and manage their energy consumption.
+The simulation focuses on a team of agents (rovers) in a lunar-like terrain, where they must establish communication routes using multiple frequencies while managing energy consumption.
 
-Support for dynamic radio map prediction via [RadioLunaDiff](https://github.com/anderspearson206/RadioLunaDiff) was added.
+Support for dynamic radio map prediction via [RadioLunaDiff](https://github.com/anderspearson206/RadioLunaDiff) is integrated directly into the environment.
+
+For older Gymnasium support, see the [legacy-gym branch](https://github.com/anderspearson206/lunar-mesh-env/tree/legacy-gym)
+
+## Features
+
+- **Multi-Agent Architecture:** Built on the PettingZoo API for cooperative multi-agent tasks.
+- **Radio Propagation:** Simulates complex signal propagation and interference.
+- **Neural Network Integration:** Includes support for deep learning-based radio map prediction (RadioLunaDiff).
 
 ## Installation
 
-Note, due to dependency issues with mobile-env, this does not work on python>3.10
+**Prerequisite:** Python 3.10 is recommended for the best compatibility with PyTorch and PettingZoo.
 
 1.  **Clone the Repository:**
 
@@ -17,19 +25,24 @@ Note, due to dependency issues with mobile-env, this does not work on python>3.1
     cd lunar-mesh-env
     ```
 
-2.  **Install Dependencies:**
-    For use without the RadioLunaDiff model:
-    `bash
-pip install -r requirements.txt
-`
+2.  **Set up Conda environment (recommended):**
 
-For use with the RLD model:
-`bash
-    pip install -r nn_requirements.txt
-    `
+    ```bash
+    conda create -n lunar_mesh python=3.10
+    conda activate lunar_mesh
+    ```
+
+3.  **Install Dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
 
 ## Example
 
-The `examples/run_simulation.py` script provides a simple way to run the environment and see the visualization. You will need radio map data for this
+The repository includes a script to run the multi-agent simulation with the default configuration.
 
-The `examples/run_simulation_nn.py` script will do the exact same thing as `examples/run_simulation.py`, but with use of the RLD neural network. In the future this will be adjusted to take advantage of the RLD NN's ability to dynamically produce radio maps, but for now the side by side comparison is helpful.
+To run the MARL environment:
+
+```bash
+python examples/run_marl_simulation.py
+```
