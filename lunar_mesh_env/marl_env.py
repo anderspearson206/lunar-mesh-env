@@ -38,12 +38,12 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.width = 256.0 
         self.height = 256.0
         self.ROVER_SPEED = 0.2
-        self.STEP_LENGTH = 20.0
+        self.STEP_LENGTH = 20
         self.METERS_PER_PIXEL = 1.0
         self.MAX_DIST_PER_STEP = (self.ROVER_SPEED * self.STEP_LENGTH) / self.METERS_PER_PIXEL
         
         # restricts movement on steep inclines
-        self.MAX_INCLINE_PER_STEP = self.MAX_DIST_PER_STEP * 0.6
+        self.MAX_INCLINE_PER_STEP = self.MAX_DIST_PER_STEP*0.2
         
         
         # Energy & Rewards
@@ -117,7 +117,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.base_station.x = new_bs_x
         self.base_station.y = new_bs_y
         
-        safety_factor = 0.85 
+        safety_factor = 0.5
         per_pixel_threshold = (self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)) * safety_factor
         # reset agent states
         for agent_id in self.agents:
@@ -181,7 +181,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             # follow path to objective
             if agent.nav_path and len(agent.nav_path) > 1:
                 # only look at the next 15 nodes to find closest
-                search_window = agent.nav_path[:int(self.MAX_DIST_PER_STEP*2)] 
+                search_window = agent.nav_path[:15] 
 
                 dists = [np.sqrt((n[0]-agent.x)**2 + (n[1]-agent.y)**2) for n in search_window]
                 
@@ -225,6 +225,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                 
                 if height_diff > self.MAX_INCLINE_PER_STEP:
                     # blocked
+                    print("blocked action")
                     rewards[agent_id] += self.PENALTY_INVALID_MOVE
                     step_energy = self.COST_IDLE_PER_STEP 
                 else:
@@ -248,7 +249,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             rewards[agent_id] += dist_delta * self.REWARD_DIST_SCALE
 
             # arrival logic
-            if curr_dist < self.MAX_DIST_PER_STEP: 
+            if curr_dist < (self.MAX_DIST_PER_STEP*2): 
                 rewards[agent_id] += self.REWARD_GOAL_ARRIVAL
                 infos[agent_id]['task_complete'] = True
                 
@@ -346,7 +347,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         """
         agent = self.agent_map[agent_id]
         
-        if not agent.nav_path or len(agent.nav_path) < 2:
+        if not agent.nav_path:
             return 0 
         
         # path is in pixel coords, but our actions are in directions
@@ -356,7 +357,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         lookahead = min(len(agent.nav_path) - 1, safe_lookahead) 
         
         # Scan forward if needed (Pure Pursuit logic from previous step)
-        lookahead_radius = self.MAX_DIST_PER_STEP * 1.1
+        lookahead_radius = self.MAX_DIST_PER_STEP * 1.5
         target_node = agent.nav_path[-1]
         for node in agent.nav_path:
             d_sq = (node[0] - agent.x)**2 + (node[1] - agent.y)**2
@@ -364,10 +365,17 @@ class LunarRoverMeshEnv(ParallelEnv):
                 target_node = node
                 break
 
-        # get vector to target
-        tx, ty = target_node
+        if target_node == agent.nav_path[-1]:
+             tx, ty = agent.goal_x, agent.goal_y
+        else:
+             tx, ty = target_node
+
+
         dx = tx - agent.x
         dy = ty - agent.y
+
+        if abs(dx) < 0.5 and abs(dy) < 0.5:
+             return 0
         
         # determine angle
         angle = np.arctan2(dy, dx)
@@ -385,8 +393,52 @@ class LunarRoverMeshEnv(ParallelEnv):
             6: 2, # South
             7: 7  # SE
         }
+
+        check_order = [0, 1, -1, 2, -2] 
         
-        return map_sector_to_action.get(sector_idx, 0)
+        for offset in check_order:
+            if check_order == 1:
+                print('failed initial move')
+            check_idx = (sector_idx + offset) % 8
+            proposed_action = map_sector_to_action[check_idx]
+            
+            if self._is_move_valid(agent, proposed_action):
+                return proposed_action
+                
+        # all moves are blocked
+        return 0
+    
+
+    def _is_move_valid(self, agent, move_cmd):
+        """Helper to check if a move is valid (in bounds and valid slope)"""
+        if move_cmd == 0: return True # Idle is always valid
+        
+        dx, dy = 0, 0
+        # cardinal
+        if move_cmd == 1: dy = 1        # N
+        elif move_cmd == 2: dy = -1     # S
+        elif move_cmd == 3: dx = -1     # W
+        elif move_cmd == 4: dx = 1      # E
+        # diagonal
+        elif move_cmd == 5: dx, dy = 0.707, 0.707   # NE
+        elif move_cmd == 6: dx, dy = -0.707, 0.707  # NW
+        elif move_cmd == 7: dx, dy = 0.707, -0.707  # SE
+        elif move_cmd == 8: dx, dy = -0.707, -0.707 # SW
+
+        dist = np.sqrt(dx**2 + dy**2)
+        scale = self.MAX_DIST_PER_STEP / dist
+        
+        new_x = np.clip(agent.x + dx*scale, 0, self.width - 1)
+        new_y = np.clip(agent.y + dy*scale, 0, self.height - 1)
+
+        current_z = self.heightmap[int(agent.y), int(agent.x)]
+        target_z = self.heightmap[int(new_y), int(new_x)]
+        height_diff = target_z - current_z
+        
+        if height_diff > self.MAX_INCLINE_PER_STEP:
+            return False # blocked by slope
+            
+        return True
     
     def _update_radio_cache_batch(self):
         """
@@ -668,7 +720,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             ax.plot(self.history['datarate'], color="black")
         ax.set_ylabel("Avg Rate (Mbps)")
         ax.set_xlim([0, self.EP_MAX_TIME])
-        ax.set_ylim([0, 110])
+        ax.set_ylim([0, 550])
 
     def render_avg_energy(self, ax):
         if len(self.history['energy']) > 0:
