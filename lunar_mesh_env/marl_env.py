@@ -47,11 +47,14 @@ class LunarRoverMeshEnv(ParallelEnv):
         
         
         # Energy & Rewards
-        self.START_ENERGY = 1000.0
-        self.COST_MOVE_PER_STEP = 5.0
-        self.COST_TX_5G_PER_STEP = 1.0
-        self.COST_TX_415_PER_STEP = 2.0
-        self.COST_IDLE_PER_STEP = 0.1
+        self.START_ENERGY = 10000.0
+        # Energy consumption in Joules (Watts * seconds)
+        self.COST_MOVE_PER_STEP = 36 * self.STEP_LENGTH # Assumed max efficiency
+        # Router is always on so constant power draw.
+        self.COST_TX_5G_PER_STEP = 0 * self.STEP_LENGTH
+        self.COST_TX_415_PER_STEP =  0 * self.STEP_LENGTH
+
+        self.COST_IDLE_PER_STEP = (33.25 + 6.27) * self.STEP_LENGTH # Power consumption of RT-AC86U + Jetson
         self.EP_MAX_TIME = 300
         
         # Reward Config
@@ -304,14 +307,23 @@ class LunarRoverMeshEnv(ParallelEnv):
                 
                 if rssi > -90.0: 
                     self.connections[agent].add(target_entity)
+                    
+                    def get_datarate(bandwidth, rssi, receiver_noise_figure=5.0):
+                        '''bandwidth in MHz, rssi in dBm, returns Mbps'''
+                        noise_power = -174 + 10 * np.log10(bandwidth * 1e6) + receiver_noise_figure
+                        signal_noise_ratio = 10**((rssi - noise_power)/10)
+                        capacity_bps = bandwidth * 1e6 * np.log2(1 + signal_noise_ratio)
+                        actual_bps = capacity_bps * 0.5  # assumed 50% efficiency
+                        return actual_bps / 1e6  # convert to Mbps
+                    
                     if is_bs:
                         rewards[agent_id] += self.REWARD_BS_LINK
                         self.custom_links[(agent, target_entity)] = 'cyan' 
-                        agent.current_datarate = 500.0 
+                        agent.current_datarate = get_datarate(80, rssi)
                     else:
                         rewards[agent_id] += self.REWARD_PEER_LINK
                         self.custom_links[(agent, target_entity)] = 'green'
-                        agent.current_datarate = 100.0
+                        agent.current_datarate = get_datarate(80, rssi)
                     tx_cost = self.COST_TX_5G_PER_STEP
                     agent.energy -= tx_cost
                     self.total_energy_consumed_step += tx_cost
@@ -676,4 +688,4 @@ class LunarRoverMeshEnv(ParallelEnv):
         ax.set_ylabel("Step Energy")
         ax.set_xlabel("Step")
         ax.set_xlim([0, self.EP_MAX_TIME])
-        ax.set_ylim([0, 100])
+        ax.set_ylim([0, 10000])
