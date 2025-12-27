@@ -47,7 +47,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         
         
         # Energy & Rewards
-        self.START_ENERGY = 1000.0
+        self.START_ENERGY = 2000.0
         self.COST_MOVE_PER_STEP = 5.0
         self.COST_TX_5G_PER_STEP = 1.0
         self.COST_TX_415_PER_STEP = 2.0
@@ -62,7 +62,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         # but since we allow them to leave the path for comms, 
         # we need to reward them for arriving.
         self.REWARD_GOAL_ARRIVAL = 100.0 
-        self.REWARD_DIST_SCALE = 2.0     
+        self.REWARD_DIST_SCALE = 2.0      
         self.PENALTY_FAIL = -0.1
         self.PENALTY_INVALID_MOVE = -1.0 
 
@@ -97,6 +97,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.radio_cache = {} 
         self.connections = defaultdict(set)
         self.custom_links = {} 
+        self.all_visible_links = []
         self.sim_time = 0
         self.history = {"datarate": [], "energy": []}
         self.total_energy_consumed_step = 0.0
@@ -110,6 +111,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.sim_time = 0
         self.connections = defaultdict(set)
         self.custom_links = {}
+        self.all_visible_links = []
         self.history = {"datarate": [], "energy": []}
         
         # randomly place bs
@@ -225,7 +227,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                 
                 if height_diff > self.MAX_INCLINE_PER_STEP:
                     # blocked
-                    print("blocked action")
+                    # print("blocked action")
                     rewards[agent_id] += self.PENALTY_INVALID_MOVE
                     step_energy = self.COST_IDLE_PER_STEP 
                 else:
@@ -278,6 +280,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         # comms
         self.connections = defaultdict(set) 
         self.custom_links = {} 
+        self.all_visible_links = []
         
         num_rovers = len(self.agents)
         bs_target_idx = num_rovers + 1 
@@ -319,6 +322,29 @@ class LunarRoverMeshEnv(ParallelEnv):
                     agent.active_route = ([(agent, target_entity)], '5.8')
                 else:
                     rewards[agent_id] += self.PENALTY_FAIL 
+
+        # check all links
+        for agent_id in self.agents:
+            agent = self.agent_map[agent_id]
+            if agent.energy <= 0: continue
+            
+            rm = self._get_cached_radio_map(agent)
+            if rm is None: continue
+
+            # bs
+            rssi_bs = self._get_signal_strength(rm, self.base_station)
+            if rssi_bs > -90.0:
+                self.all_visible_links.append((agent, self.base_station))
+            
+            #  agents
+            for other_id in self.agents:
+                if agent_id == other_id: continue
+                other = self.agent_map[other_id]
+                if other.energy <= 0: continue
+
+                rssi_other = self._get_signal_strength(rm, other)
+                if rssi_other > -90.0:
+                     self.all_visible_links.append((agent, other))
 
         # metrics & termination checks
         self.sim_time += 1
@@ -623,12 +649,17 @@ class LunarRoverMeshEnv(ParallelEnv):
             label = label_map.get(agent_id, agent_id[-1])
             ax.annotate(label, xy=(agent.x, agent.y), ha="center", va="center", color='white', fontweight='bold')
 
-        # links
+        # possible links
+        for (u, v) in self.all_visible_links:
+            ax.plot([u.x, v.x], [u.y, v.y], color='red', 
+                    linestyle='--', linewidth=1, alpha=0.5, zorder=0.5)
+
+        # active links
         for (u, v), color in self.custom_links.items():
             vx, vy = v.x, v.y 
             ax.plot([u.x, vx], [u.y, vy], color=color, 
                     path_effects=[pe.SimpleLineShadow(shadow_color="black"), pe.Normal()],
-                    linewidth=3, zorder=1)
+                    linewidth=3, zorder=1.5) 
 
         ax.axis('off')
         ax.set_xlim([0, self.width])

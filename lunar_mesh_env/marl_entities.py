@@ -41,13 +41,12 @@ class MarlMeshAgent:
                               bs_location: Tuple[float, float],
                               radio_map: np.ndarray = None) -> Dict[str, np.ndarray]:
         """
-        Generates the agent-centric observation dictionary.
-        Now includes:
+        Generates the agent observation dictionary.
         1. Self State
-        2. Terrain (Global)
+        2. Terrain
         3. Neighbor Relative Positions
         4. Base Station Relative Position
-        5. Radio Map (Self-Predicted Connectivity)
+        5. Radio Map
         """
         my_state = np.array([
             self.energy, 
@@ -85,7 +84,7 @@ class MarlMeshAgent:
 
         neighbors_arr = np.array(neighbor_features, dtype=np.float32)
         
-        # Base station vector
+        # base station vector
         bs_dx = bs_location[0] - self.x
         bs_dy = bs_location[1] - self.y
         bs_obs = np.array([bs_dx, bs_dy], dtype=np.float32)
