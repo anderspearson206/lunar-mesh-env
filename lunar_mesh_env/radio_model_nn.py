@@ -28,6 +28,7 @@ class RadioMapModelNN:
                  env_height: float,
                  num_inference_steps: int = 4,
                  image_size: int = 256,
+                 dummy_mode: bool = False,
                  device: str = None):
         
         # print("Initializing Generative RadioMapModel...")
@@ -42,6 +43,10 @@ class RadioMapModelNN:
         self.width = env_width
         self.height = env_height
         
+        self.dummy_mode = dummy_mode
+        if dummy_mode:
+            print("WARNING: RadioMapModelNN running in DUMMY MODE. No real inference will be performed.")
+            return
 
         try:
             # K2 UNet
@@ -109,6 +114,15 @@ class RadioMapModelNN:
         """
         Generates a radiomap for a given transmitter position and frequency.
         """
+        if self.dummy_mode:
+            # 1/r^2 for testing purposes
+            Y, X = np.ogrid[:256, :256]
+            dist_sq = (X - tx_pos[0])**2 + (Y - tx_pos[1])**2
+            dist_sq[dist_sq == 0] = 1.0 
+            dummy_dbm = -10 - 20 * np.log10(dist_sq)
+            return np.clip(dummy_dbm, -150, 0)
+        
+        
         with torch.no_grad():
         
             tx_map = self.processor.create_tx_map(
@@ -186,6 +200,16 @@ class RadioMapModelNN:
         Returns:
             np.ndarray of shape (Batch_Size, Height, Width) containing dBm values.
         """
+        if self.dummy_mode:
+            batch_maps = []
+            for pos in tx_positions:
+                Y, X = np.ogrid[:256, :256]
+                dist_sq = (X - pos[0])**2 + (Y - pos[1])**2
+                dist_sq[dist_sq == 0] = 1.0 
+                dummy_dbm = -10 - 20 * np.log10(dist_sq)
+                batch_maps.append(np.clip(dummy_dbm, -150, 0))
+            return np.array(batch_maps)
+        
         batch_size = len(tx_positions)
         if batch_size == 0:
             return np.array([])

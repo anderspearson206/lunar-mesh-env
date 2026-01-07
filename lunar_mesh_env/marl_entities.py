@@ -132,7 +132,7 @@ class MarlMeshAgent:
         """
         LEGACY: Agent's hardcoded logic to find a route.
         """
-        HIGH_SPEED_THRESH_DBM = -80.0
+        HIGH_SPEED_THRESH_DBM = -90.0
         ROBUST_THRESH_DBM = -100.0 
 
         # try 5.8GHz

@@ -529,25 +529,59 @@ class LunarRoverMeshEnv(ParallelEnv):
         all_agents = list(self.agent_map.values())
         bs_loc = self.base_station.get_position()
         current_rm = self._get_cached_radio_map(agent)
+        
+        # base obs
         obs_dict = agent.get_local_observation(self.heightmap, all_agents, bs_loc, current_rm)
+        
+        # action masking
+        num_rovers = len(self.possible_agents)
+        move_mask = np.zeros(9, dtype=np.int8)
+        comm_mask = np.zeros(num_rovers + 2, dtype=np.int8)
+
+        # movement mask
+        for move_cmd in range(9):
+            if self._is_move_valid(agent, move_cmd):
+                move_mask[move_cmd] = 1
+
+        # comm
+        comm_mask[0] = 1 
+        
+        for i, target_id in enumerate(self.possible_agents):
+            target_idx = i + 1
+            if target_id == agent_id:
+                comm_mask[target_idx] = 0 
+                continue
+                
+            target_entity = self.agent_map[target_id]
+            if target_entity.energy <= 0:
+                comm_mask[target_idx] = 0 
+            else:
+                rssi = self._get_signal_strength(current_rm, target_entity)
+                comm_mask[target_idx] = 1 if rssi > -90.0 else 0
+
+        rssi_bs = self._get_signal_strength(current_rm, self.base_station)
+        comm_mask[num_rovers + 1] = 1 if rssi_bs > -90.0 else 0
+
+        obs_dict["action_mask"] = np.concatenate([move_mask, comm_mask])
+        
         if len(obs_dict['terrain'].shape) == 2:
             obs_dict['terrain'] = np.expand_dims(obs_dict['terrain'], axis=0)
+            
         return obs_dict
     
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
-        num_neighbors = len(self.possible_agents) - 1
-        
-        # mask dim: movement(5) + comm Targets (Num_Agents + BS(1) + None(1))
-        mask_dim = 5 + (len(self.possible_agents) + 1 + 1)
+        num_rovers = len(self.possible_agents)
+        # 9 movement + (num_rovers + 2) comm targets
+        mask_dim = 9 + (num_rovers + 2) 
         
         return spaces.Dict({
             "self_state": spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
-            "terrain": spaces.Box(low=0, high=1, shape=(1, int(self.height), int(self.width)), dtype=np.float32),
-            "neighbors": spaces.Box(low=-np.inf, high=np.inf, shape=(num_neighbors, 2), dtype=np.float32),
+            "terrain": spaces.Box(low=0, high=1, shape=(1, 256, 256), dtype=np.float32),
+            "neighbors": spaces.Box(low=-np.inf, high=np.inf, shape=(num_rovers - 1, 2), dtype=np.float32),
             "base_station": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
-            "radio_map": spaces.Box(low=-200, high=0, shape=(1, int(self.height), int(self.width)), dtype=np.float32),
-            "goal_vector": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32), # NEW
+            "radio_map": spaces.Box(low=-200, high=0, shape=(1, 256, 256), dtype=np.float32),
+            "goal_vector": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             "action_mask": spaces.Box(low=0, high=1, shape=(mask_dim,), dtype=np.int8)
         })
 
