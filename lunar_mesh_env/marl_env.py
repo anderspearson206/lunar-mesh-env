@@ -364,7 +364,6 @@ class LunarRoverMeshEnv(ParallelEnv):
 
         active_this_step = list(actions.keys())
         
-        # 2. Check for terminations/truncations
         global_truncate = self.sim_time >= self.EP_MAX_TIME
         for agent_id in active_this_step:
             agent = self.agent_map[agent_id]
@@ -373,12 +372,8 @@ class LunarRoverMeshEnv(ParallelEnv):
             truncations[agent_id] = global_truncate
             infos[agent_id] = {"energy": agent.energy, "pos": (agent.x, agent.y)}
 
-        # 3. CRITICAL: Generate observations for EVERY agent that was in the action dict
-        # This prevents the "dict_keys([])" error in your log.
         observations = {a: self._get_obs(a) for a in active_this_step}
-
-        # 4. Update the list of agents for the NEXT step
-        # Only remove them from the 'possible' list AFTER we've returned their final state
+        
         self.agents = [a for a in self.agents if not terminations.get(a, False) and not truncations.get(a, False)]
         
         return observations, rewards, terminations, truncations, infos
@@ -546,15 +541,13 @@ class LunarRoverMeshEnv(ParallelEnv):
         bs_loc = self.base_station.get_position()
         current_rm = self._get_cached_radio_map(agent)
         
-        # 1. Ensure RM is safe and float32
-        safe_rm = np.clip(current_rm, -200.0, 0.0).astype(np.float32)
+        safe_rm = np.clip(current_rm, -190.0, 0.0).astype(np.float32)
 
-        # 2. Get local observation - FIX: consistently use 'obs_dict'
         obs_dict = agent.get_local_observation(self.heightmap.astype(np.float32), all_agents, bs_loc, safe_rm)
 
-        # 3. Action masking logic
         num_rovers = len(self.possible_agents)
         move_mask = np.zeros(9, dtype=np.int8)
+        move_mask[0] = 1
         comm_mask = np.zeros(num_rovers + 2, dtype=np.int8)
 
         for move_cmd in range(9):
@@ -577,14 +570,13 @@ class LunarRoverMeshEnv(ParallelEnv):
         rssi_bs = self._get_signal_strength(current_rm, self.base_station)
         comm_mask[num_rovers + 1] = 1 if rssi_bs > -90.0 else 0
 
-        # Now this works because obs_dict is defined above
         obs_dict["action_mask"] = np.concatenate([move_mask, comm_mask]).astype(np.int8)
         
         if len(obs_dict['terrain'].shape) == 2:
             obs_dict['terrain'] = np.expand_dims(obs_dict['terrain'], axis=0)
-            
-        # 4. Final casting - FIX: ensure we return the dict we modified
-        return {
+          
+        # have to cast everything to correct dtypes for rllib  
+        final_obs = {
             "self_state": obs_dict["self_state"].astype(np.float32),
             "terrain": obs_dict["terrain"].astype(np.float32),
             "neighbors": obs_dict["neighbors"].astype(np.float32),
@@ -593,6 +585,13 @@ class LunarRoverMeshEnv(ParallelEnv):
             "goal_vector": obs_dict["goal_vector"].astype(np.float32),
             "action_mask": obs_dict["action_mask"].astype(np.int8)
         }
+
+        # safety check for NaNs/Infs
+        for key, val in final_obs.items():
+            if not np.all(np.isfinite(val)):
+                final_obs[key] = np.nan_to_num(val, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        return final_obs
     
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
