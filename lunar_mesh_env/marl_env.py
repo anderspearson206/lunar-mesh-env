@@ -47,7 +47,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         
         
         # Energy & Rewards
-        self.START_ENERGY = 2000.0
+        self.START_ENERGY = 50000.0
         self.COST_MOVE_PER_STEP = 5.0
         self.COST_TX_5G_PER_STEP = 1.0
         self.COST_TX_415_PER_STEP = 2.0
@@ -362,8 +362,24 @@ class LunarRoverMeshEnv(ParallelEnv):
             truncations[agent_id] = global_truncate
             infos[agent_id] = {"energy": agent.energy, "pos": (agent.x, agent.y)}
 
-        self.agents = [a for a in self.agents if not terminations[a] and not truncations[a]]
-        observations = {a: self._get_obs(a) for a in self.agents}
+        active_this_step = list(actions.keys())
+        
+        # 2. Check for terminations/truncations
+        global_truncate = self.sim_time >= self.EP_MAX_TIME
+        for agent_id in active_this_step:
+            agent = self.agent_map[agent_id]
+            if agent.energy <= 0:
+                terminations[agent_id] = True
+            truncations[agent_id] = global_truncate
+            infos[agent_id] = {"energy": agent.energy, "pos": (agent.x, agent.y)}
+
+        # 3. CRITICAL: Generate observations for EVERY agent that was in the action dict
+        # This prevents the "dict_keys([])" error in your log.
+        observations = {a: self._get_obs(a) for a in active_this_step}
+
+        # 4. Update the list of agents for the NEXT step
+        # Only remove them from the 'possible' list AFTER we've returned their final state
+        self.agents = [a for a in self.agents if not terminations.get(a, False) and not truncations.get(a, False)]
         
         return observations, rewards, terminations, truncations, infos
 
@@ -530,28 +546,27 @@ class LunarRoverMeshEnv(ParallelEnv):
         bs_loc = self.base_station.get_position()
         current_rm = self._get_cached_radio_map(agent)
         
-        # base obs
-        obs_dict = agent.get_local_observation(self.heightmap, all_agents, bs_loc, current_rm)
-        
-        # action masking
+        # 1. Ensure RM is safe and float32
+        safe_rm = np.clip(current_rm, -200.0, 0.0).astype(np.float32)
+
+        # 2. Get local observation - FIX: consistently use 'obs_dict'
+        obs_dict = agent.get_local_observation(self.heightmap.astype(np.float32), all_agents, bs_loc, safe_rm)
+
+        # 3. Action masking logic
         num_rovers = len(self.possible_agents)
         move_mask = np.zeros(9, dtype=np.int8)
         comm_mask = np.zeros(num_rovers + 2, dtype=np.int8)
 
-        # movement mask
         for move_cmd in range(9):
             if self._is_move_valid(agent, move_cmd):
                 move_mask[move_cmd] = 1
 
-        # comm
         comm_mask[0] = 1 
-        
         for i, target_id in enumerate(self.possible_agents):
             target_idx = i + 1
             if target_id == agent_id:
                 comm_mask[target_idx] = 0 
                 continue
-                
             target_entity = self.agent_map[target_id]
             if target_entity.energy <= 0:
                 comm_mask[target_idx] = 0 
@@ -562,12 +577,22 @@ class LunarRoverMeshEnv(ParallelEnv):
         rssi_bs = self._get_signal_strength(current_rm, self.base_station)
         comm_mask[num_rovers + 1] = 1 if rssi_bs > -90.0 else 0
 
-        obs_dict["action_mask"] = np.concatenate([move_mask, comm_mask])
+        # Now this works because obs_dict is defined above
+        obs_dict["action_mask"] = np.concatenate([move_mask, comm_mask]).astype(np.int8)
         
         if len(obs_dict['terrain'].shape) == 2:
             obs_dict['terrain'] = np.expand_dims(obs_dict['terrain'], axis=0)
             
-        return obs_dict
+        # 4. Final casting - FIX: ensure we return the dict we modified
+        return {
+            "self_state": obs_dict["self_state"].astype(np.float32),
+            "terrain": obs_dict["terrain"].astype(np.float32),
+            "neighbors": obs_dict["neighbors"].astype(np.float32),
+            "base_station": obs_dict["base_station"].astype(np.float32),
+            "radio_map": obs_dict["radio_map"].astype(np.float32),
+            "goal_vector": obs_dict["goal_vector"].astype(np.float32),
+            "action_mask": obs_dict["action_mask"].astype(np.int8)
+        }
     
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
@@ -577,7 +602,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         
         return spaces.Dict({
             "self_state": spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
-            "terrain": spaces.Box(low=0, high=1, shape=(1, 256, 256), dtype=np.float32),
+            "terrain": spaces.Box(low=0, high=496, shape=(1, 256, 256), dtype=np.float32),
             "neighbors": spaces.Box(low=-np.inf, high=np.inf, shape=(num_rovers - 1, 2), dtype=np.float32),
             "base_station": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             "radio_map": spaces.Box(low=-200, high=0, shape=(1, 256, 256), dtype=np.float32),
@@ -750,12 +775,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.window.blit(plot, (0, 0))
         pygame.display.flip()
         
-        #Cap framerate
         self.clock.tick(self.metadata["render_fps"])
-        
-        # We process events to keep the window responsive, but we 
-        # generally let the Runner script handle the QUIT logic 
-        # to avoid closing the environment mid-step.
+
         pygame.event.pump()
 
         

@@ -1,3 +1,5 @@
+# run_built_in_heuristic.py
+
 import numpy as np
 import imageio
 import torch
@@ -52,7 +54,9 @@ def main():
             env_width=256, 
             env_height=256,
             num_inference_steps=4,
+            dummy_mode=False,
             device=device
+            
         )
     except Exception as e:
         print(f"CRITICAL WARNING: Radio Model failed to load ({e}).")
@@ -61,7 +65,7 @@ def main():
     env = LunarRoverMeshEnv(
         hm_path=HM_PATH,
         radio_model=radio_model,
-        num_agents=2, 
+        num_agents=3, 
         render_mode="rgb_array" 
     )
     
@@ -72,7 +76,7 @@ def main():
     print(f"Agents: {env.possible_agents}")
     print("Goal: Rovers will navigate to randomly assigned tasks (task marked as X).")
     
-    SIM_STEPS = 30
+    SIM_STEPS = 5
     
     for step in range(SIM_STEPS):
         
