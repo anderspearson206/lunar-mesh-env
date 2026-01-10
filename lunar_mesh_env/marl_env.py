@@ -581,8 +581,8 @@ class LunarRoverMeshEnv(ParallelEnv):
             "terrain": obs_dict["terrain"].astype(np.float32),
             "neighbors": obs_dict["neighbors"].astype(np.float32),
             "base_station": obs_dict["base_station"].astype(np.float32),
-            "radio_map": obs_dict["radio_map"].astype(np.float32),
             "goal_vector": obs_dict["goal_vector"].astype(np.float32),
+            "radio_map": obs_dict["radio_map"].astype(np.float32),
             "action_mask": obs_dict["action_mask"].astype(np.int8)
         }
 
@@ -604,8 +604,8 @@ class LunarRoverMeshEnv(ParallelEnv):
             "terrain": spaces.Box(low=0, high=496, shape=(1, 256, 256), dtype=np.float32),
             "neighbors": spaces.Box(low=-np.inf, high=np.inf, shape=(num_rovers - 1, 2), dtype=np.float32),
             "base_station": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
-            "radio_map": spaces.Box(low=-200, high=0, shape=(1, 256, 256), dtype=np.float32),
             "goal_vector": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
+            "radio_map": spaces.Box(low=-200, high=0, shape=(1, 256, 256), dtype=np.float32),
             "action_mask": spaces.Box(low=0, high=1, shape=(mask_dim,), dtype=np.int8)
         })
 
