@@ -283,47 +283,58 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.all_visible_links = []
         
         num_rovers = len(self.agents)
-        bs_target_idx = num_rovers + 1 
+        # bs_target_idx = num_rovers + 1 
 
         for agent_id, action in actions.items():
             if terminations[agent_id]: continue
             
             agent = self.agent_map[agent_id]
-            target_idx = action[1] 
-            
-            target_entity = None
-            is_bs = False
-
-            if 0 < target_idx <= num_rovers:
-                target_str = self.possible_agents[target_idx - 1]
-                if target_str != agent_id:
-                    target_entity = self.agent_map[target_str]
-            elif target_idx == bs_target_idx:
-                target_entity = self.base_station 
-                is_bs = True
-
-            if target_entity:
-                radio_map = self._get_cached_radio_map(agent)
-                rssi = self._get_signal_strength(radio_map, target_entity)
-                
-                if rssi > -90.0: 
-                    self.connections[agent].add(target_entity)
-                    if is_bs:
-                        rewards[agent_id] += self.REWARD_BS_LINK
-                        self.custom_links[(agent, target_entity)] = 'cyan' 
-                        agent.current_datarate = 500.0 
-                    else:
-                        rewards[agent_id] += self.REWARD_PEER_LINK
-                        self.custom_links[(agent, target_entity)] = 'green'
-                        agent.current_datarate = 100.0
+            move_cmd = action[0]
+            comm_flags = action[1:]
+            # print(comm_flags)
+            radio_map = self._get_cached_radio_map(agent)
+            agent.active_route = ([], '5.8')
+            for i in range(num_rovers):
+                if comm_flags[i] == 1:
+                    target_id = self.possible_agents[i]
+                    if target_id != agent_id:
+                        target_entity = self.agent_map[target_id]
+                        rssi = self._get_signal_strength(radio_map, target_entity)
+                        
+                        if rssi > -90.0: 
+                            self.connections[agent].add(target_entity)
+                            rewards[agent_id] += self.REWARD_PEER_LINK
+                            self.custom_links[(agent, target_entity)] = 'green'
+                            tx_cost = self.COST_TX_5G_PER_STEP
+                            agent.energy -= tx_cost
+                            self.total_energy_consumed_step += tx_cost
+                            old_active = agent.active_route[0]
+                            new_active = old_active + [(agent, target_entity)]
+                            agent.active_route = (new_active, '5.8')
+                        else:
+                            rewards[agent_id] += self.PENALTY_FAIL
+            agent.current_datarate = 0.0
+            if comm_flags[-1] == 1:
+                rssi_bs = self._get_signal_strength(radio_map, self.base_station)
+                if rssi_bs > -90.0:
+                    self.connections[agent].add(self.base_station)
+                    rewards[agent_id] += self.REWARD_BS_LINK
+                    self.custom_links[(agent, self.base_station)] = 'cyan' 
                     tx_cost = self.COST_TX_5G_PER_STEP
                     agent.energy -= tx_cost
                     self.total_energy_consumed_step += tx_cost
-                    agent.active_route = ([(agent, target_entity)], '5.8')
+                    agent.current_datarate = 500.0
+                    old_active = agent.active_route[0]
+                    new_active = old_active + [(agent, self.base_station)]
+                    agent.active_route = (new_active, '5.8')
                 else:
-                    rewards[agent_id] += self.PENALTY_FAIL 
+                    rewards[agent_id] += self.PENALTY_FAIL
 
-        # check all links
+            num_active_comms = len(self.connections[agent])
+            agent.current_datarate += num_active_comms * 100.0
+            
+
+        # color possible links
         for agent_id in self.agents:
             agent = self.agent_map[agent_id]
             if agent.energy <= 0: continue
@@ -548,27 +559,22 @@ class LunarRoverMeshEnv(ParallelEnv):
         num_rovers = len(self.possible_agents)
         move_mask = np.zeros(9, dtype=np.int8)
         move_mask[0] = 1
-        comm_mask = np.zeros(num_rovers + 2, dtype=np.int8)
+        comm_mask = np.zeros(num_rovers + 1, dtype=np.int8)
 
         for move_cmd in range(9):
             if self._is_move_valid(agent, move_cmd):
                 move_mask[move_cmd] = 1
 
-        comm_mask[0] = 1 
         for i, target_id in enumerate(self.possible_agents):
-            target_idx = i + 1
             if target_id == agent_id:
-                comm_mask[target_idx] = 0 
+                comm_mask[i] = 0
                 continue
             target_entity = self.agent_map[target_id]
-            if target_entity.energy <= 0:
-                comm_mask[target_idx] = 0 
-            else:
-                rssi = self._get_signal_strength(current_rm, target_entity)
-                comm_mask[target_idx] = 1 if rssi > -90.0 else 0
+            rssi = self._get_signal_strength(current_rm, target_entity)
+            comm_mask[i] = 1 if (rssi > -90.0 and target_entity.energy > 0) else 0
 
         rssi_bs = self._get_signal_strength(current_rm, self.base_station)
-        comm_mask[num_rovers + 1] = 1 if rssi_bs > -90.0 else 0
+        comm_mask[-1] = 1 if rssi_bs > -90.0 else 0
 
         obs_dict["action_mask"] = np.concatenate([move_mask, comm_mask]).astype(np.int8)
         
@@ -596,8 +602,8 @@ class LunarRoverMeshEnv(ParallelEnv):
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
         num_rovers = len(self.possible_agents)
-        # 9 movement + (num_rovers + 2) comm targets
-        mask_dim = 9 + (num_rovers + 2) 
+        # 9 movement + (num_rovers + bs) comm targets
+        mask_dim = 9 + (num_rovers + 1) 
         
         return spaces.Dict({
             "self_state": spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
@@ -611,11 +617,16 @@ class LunarRoverMeshEnv(ParallelEnv):
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent):
-        # [Movement (0-8), Communication Target]
+        # action [0]movement
         # 0: Idle
         # 1-4: N, S, W, E
         # 5-8: NE, NW, SE, SW
-        return spaces.MultiDiscrete([9, len(self.possible_agents) + 2])
+        num_rovers = len(self.possible_agents)
+        # action[1-N]: comm target
+        # action[N+1]: base station
+        shape = [9] + [2]*(num_rovers+1)
+        # print(shape)
+        return spaces.MultiDiscrete(shape)
 
     def render(self):
         if self.render_mode is None: return

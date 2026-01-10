@@ -18,14 +18,14 @@ def get_combined_heuristic_action(agent_id, env):
     move_action = env.heuristic_move_action(agent_id)
     
     num_rovers = len(env.possible_agents)
-    bs_comm_index = num_rovers + 1
     
-    return [move_action, bs_comm_index]
+    return [move_action] + [0]*num_rovers + [1]  # Only communicate with Base Station
 
 def main():
     
-    DATA_ROOT = '../../NASA_DCGR_NETWORKING/radio_data_2/radio_data_2'
-    HM_PATH = f'{DATA_ROOT}/hm/hm_18.npy'
+    DATA_ROOT = '/mnt/2ndSSD/rm_raw_for_network'
+    # Update this path if you are running locally without the full dataset
+    HM_PATH = f'{DATA_ROOT}/hm/hm_18.npy' 
     
     MODEL_PATHS = {
         'k2_model': '../RadioLunaDiff/pretrained_models_network/k2unet/best_k2_model.pth',
@@ -76,7 +76,7 @@ def main():
     print(f"Agents: {env.possible_agents}")
     print("Goal: Rovers will navigate to randomly assigned tasks (task marked as X).")
     
-    SIM_STEPS = 5
+    SIM_STEPS = 20
     
     for step in range(SIM_STEPS):
         
