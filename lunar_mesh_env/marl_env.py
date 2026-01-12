@@ -88,10 +88,10 @@ class LunarRoverMeshEnv(ParallelEnv):
         # Load Heightmap
         self.heightmap = None
         try:
-            self.heightmap = np.load(self.hm_path)
+            self.heightmap = np.load(self.hm_path).astype(np.float32)
         except Exception as e:
             print(f"Warning: Could not load heightmap: {e}")
-            self.heightmap = np.zeros((int(self.height), int(self.width)))
+            self.heightmap = np.zeros((int(self.height), int(self.width)), dtype=np.float32)
 
         # Cache & History
         self.radio_cache = {} 
@@ -552,31 +552,36 @@ class LunarRoverMeshEnv(ParallelEnv):
         bs_loc = self.base_station.get_position()
         current_rm = self._get_cached_radio_map(agent)
         
-        safe_rm = np.clip(current_rm, -190.0, 0.0).astype(np.float32)
+        current_rm = self._get_cached_radio_map(agent)
+    
+        if current_rm is None:
+            print("Warning: Radio map is None, returning default safe map.")
+            safe_rm = np.full((1, 256, 256), -200.0, dtype=np.float32)
+        else:
+            safe_rm = np.clip(current_rm, -190.0, 0.0).astype(np.float32)
+            if len(safe_rm.shape) == 2:
+                safe_rm = np.expand_dims(safe_rm, axis=0)
+
 
         obs_dict = agent.get_local_observation(self.heightmap.astype(np.float32), all_agents, bs_loc, safe_rm)
 
         num_rovers = len(self.possible_agents)
         move_mask = np.zeros(9, dtype=np.int8)
         move_mask[0] = 1
-        comm_mask = np.zeros(num_rovers + 1, dtype=np.int8)
+        
 
-        for move_cmd in range(9):
-            if self._is_move_valid(agent, move_cmd):
-                move_mask[move_cmd] = 1
-
-        for i, target_id in enumerate(self.possible_agents):
+        comm_masks = []
+        for target_id in self.possible_agents:
             if target_id == agent_id:
-                comm_mask[i] = 0
+                comm_masks.append([1.0, 0.0]) # Cannot comm with self
                 continue
-            target_entity = self.agent_map[target_id]
-            rssi = self._get_signal_strength(current_rm, target_entity)
-            comm_mask[i] = 1 if (rssi > -90.0 and target_entity.energy > 0) else 0
-
+            rssi = self._get_signal_strength(current_rm, self.agent_map[target_id])
+            comm_masks.append([1.0, 1.0] if rssi > -90.0 else [1.0, 0.0])
+        
+        # Base Station target
         rssi_bs = self._get_signal_strength(current_rm, self.base_station)
-        comm_mask[-1] = 1 if rssi_bs > -90.0 else 0
-
-        obs_dict["action_mask"] = np.concatenate([move_mask, comm_mask]).astype(np.int8)
+        comm_masks.append([1.0, 1.0] if rssi_bs > -90.0 else [1.0, 0.0])
+        obs_dict["action_mask"] = np.concatenate([move_mask, np.array(comm_masks).flatten()]).astype(np.int8)
         
         if len(obs_dict['terrain'].shape) == 2:
             obs_dict['terrain'] = np.expand_dims(obs_dict['terrain'], axis=0)
@@ -595,6 +600,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         # safety check for NaNs/Infs
         for key, val in final_obs.items():
             if not np.all(np.isfinite(val)):
+                print(f"Warning: Non-finite values in observation for agent {agent_id}, key {key}. Replacing with zeros.")
                 final_obs[key] = np.nan_to_num(val, nan=0.0, posinf=0.0, neginf=0.0)
         
         return final_obs
@@ -603,15 +609,18 @@ class LunarRoverMeshEnv(ParallelEnv):
     def observation_space(self, agent):
         num_rovers = len(self.possible_agents)
         # 9 movement + (num_rovers + bs) comm targets
-        mask_dim = 9 + (num_rovers + 1) 
+        mask_dim = 9 + (num_rovers + 1) * 2
         
+        f32_min = np.finfo(np.float32).min
+        f32_max = np.finfo(np.float32).max
+
         return spaces.Dict({
-            "self_state": spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
-            "terrain": spaces.Box(low=0, high=496, shape=(1, 256, 256), dtype=np.float32),
-            "neighbors": spaces.Box(low=-np.inf, high=np.inf, shape=(num_rovers - 1, 2), dtype=np.float32),
-            "base_station": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
-            "goal_vector": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
-            "radio_map": spaces.Box(low=-200, high=0, shape=(1, 256, 256), dtype=np.float32),
+            "self_state": spaces.Box(low=f32_min, high=f32_max, shape=(4,), dtype=np.float32),
+            "terrain": spaces.Box(low=0.0, high=500.0, shape=(1, 256, 256), dtype=np.float32),
+            "neighbors": spaces.Box(low=f32_min, high=f32_max, shape=(num_rovers - 1, 2), dtype=np.float32),
+            "base_station": spaces.Box(low=f32_min, high=f32_max, shape=(2,), dtype=np.float32),
+            "goal_vector": spaces.Box(low=f32_min, high=f32_max, shape=(2,), dtype=np.float32),
+            "radio_map": spaces.Box(low=-200.0, high=0.0, shape=(1, 256, 256), dtype=np.float32),
             "action_mask": spaces.Box(low=0, high=1, shape=(mask_dim,), dtype=np.int8)
         })
 

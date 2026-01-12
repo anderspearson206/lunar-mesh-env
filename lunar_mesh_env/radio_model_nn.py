@@ -185,7 +185,7 @@ class RadioMapModelNN:
             # convert back to correct range based on oriinal training
             # dataloaders
             output_dbm = (output_map_0_1 * 210.0) - 200.0
-            
+            # print(f"Generated radiomap at tx_pos={tx_pos}, frequency={frequency}")
             return output_dbm
         
         
@@ -284,5 +284,5 @@ class RadioMapModelNN:
             # convert back to correct range based on oriinal training
             # dataloaders
             output_dbm = (output_map_0_1 * 210.0) - 200.0
-            
+            # print(f"Generated batch of {batch_size} radiomaps at frequency={frequency}")
             return output_dbm
