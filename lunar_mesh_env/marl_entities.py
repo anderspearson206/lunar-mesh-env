@@ -1,11 +1,57 @@
 import numpy as np
 from typing import List, Dict, Tuple
+from abc import ABC, abstractmethod
+from .payload_manager import Packet, PayloadManager
 
 # forward-declare to avoid a circular import
 if False:
     from .radio_model_nn import RadioMapModelNN
 
-class MarlMeshAgent:
+
+class BaseStation:
+    """
+    A static entity representing the Lander/Base Station.
+    """
+    def __init__(self, x: float, y: float, height: float = 1.0):
+        self.x = x
+        self.y = y
+        self.height = height # bs could be higher than rovers, 
+        # but we'd have to retrain the model for that.
+        # Can we use the 3m height model for BS? used in RLD paper?
+        self.id = "BS_0"  
+        self.num_packets_received = 0
+        self.num_duplicates_received = 0
+        self.packets_received = set()
+
+    def get_position(self) -> Tuple[float, float]:
+        return (self.x, self.y)
+
+    def receive_packet(self, packet:Packet):
+        self.num_packets_received += 1
+        if packet.packet_id in self.packets_received:
+            self.num_duplicates_received += 1
+        else:
+            self.packets_received.add(packet.packet_id)
+    
+    def get_state(self):
+        state = {
+            "id": self.id,
+            "pos": (self.x, self.y),
+            "num_packets_received": self.num_packets_received,
+            "num_duplicates_received": self.num_duplicates_received
+        }
+        return state
+
+
+class MarlAgent(ABC):
+    """
+    Abstract Base Class for Agents in the Lunar Mesh Environment.
+    """
+    @abstractmethod
+    def receive_packet(self, packet:Packet):
+        pass
+
+class MarlMeshAgent(MarlAgent):
     """
     A Standalone Agent that acts as a Mesh Node.
     """
@@ -194,19 +240,62 @@ class MarlMeshAgent:
             return [(self, agent_b), (agent_b, target_agent)]
 
         return []
-    
-      
-class BaseStation:
-    """
-    A static entity representing the Lander/Base Station.
-    """
-    def __init__(self, x: float, y: float, height: float = 1.0):
+
+class MarlDtnAgent(MarlAgent):
+    counter = 0  # Class-level counter for unique IDs
+
+    def __init__(self,
+                 x: float = 0.0,
+                 y: float = 0.0):        
+        
+        self.id = f'DTN_{MarlDtnAgent.counter}'
+        MarlDtnAgent.counter += 1
+        
+        # Position (initialize at provided values, will be set by env.reset)
         self.x = x
         self.y = y
-        self.height = height # bs could be higher than rovers, 
-        # but we'd have to retrain the model for that.
-        # Can we use the 3m height model for BS? used in RLD paper?
-        self.ue_id = "BS_0"  
+        
+        self.neighbors = set()
+        self.payload_manager = PayloadManager(self.id)
 
-    def get_position(self) -> Tuple[float, float]:
-        return (self.x, self.y)
+    def __str__(self):
+        return self.id
+
+    def send_packet(self, targets:list[MarlAgent|BaseStation]):
+        self.payload_manager.send_packet(targets)
+
+    def receive_packet(self, packet:Packet):
+        self.payload_manager.receive_packet(packet)
+
+    def generate_packet(self, size, time_to_live, destination):
+        self.payload_manager.generate_packet(size, time_to_live, destination)
+
+
+    def find_neighbors(self, 
+                   agents: List['MarlDtnAgent'], 
+                   radio_model, 
+                   width: float, 
+                   height: float, 
+                   dbm_thresh: float, 
+                   frequency: str
+                  ) -> List[Tuple['MarlDtnAgent', 'MarlDtnAgent']]:
+        
+        map_a = radio_model.generate_map((self.x, self.y), frequency)
+        self.neighbors = set()
+        for agent in agents:
+            # direct link
+            dbm_a_c = MarlDtnAgent.get_signal_strength(map_a, agent, width, height)
+            if dbm_a_c > dbm_thresh:
+                self.neighbors.add(agent)
+
+        return self.neighbors
+
+    def get_state(self) -> Dict[str, any]:
+        state = {
+            "id": self.id,
+            "pos": (self.x, self.y),
+            
+            # Payload/bundle delivery metrics
+            "payloads": self.payload_manager.get_state(),
+        }
+        return state

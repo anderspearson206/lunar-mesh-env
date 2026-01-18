@@ -1,0 +1,184 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from random import randint
+import imageio
+import torch
+import sys
+import os
+
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+
+COLORS = ['blue', 'purple', 'green', 'orange', 'red']
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from lunar_mesh_env import RadioMapModelNN
+from lunar_mesh_env.marl_entities import MarlDtnAgent, BaseStation
+
+def get_signal_strength(radio_map, target_agent, width, height):
+        """
+        Gets the signal strength (dBm) from a given radio_map at target's location.
+        """
+        if radio_map is None:
+            return -np.inf 
+        
+        map_shape = radio_map.shape
+        
+        col_idx = int((target_agent.x / width) * (map_shape[1] - 1))
+        row_idx = int((target_agent.y / height) * (map_shape[0] - 1))
+        
+        col_idx = np.clip(col_idx, 0, map_shape[1] - 1)
+        row_idx = np.clip(row_idx, 0, map_shape[0] - 1)
+        
+        return radio_map[row_idx, col_idx]
+
+def render_frame(agents, base_station, heightmap, step, color_map, links):
+    """Render the current simulation state."""
+    width, height = 256.0, 256.0
+    
+    fig = plt.figure(figsize=(18, 6), dpi=80)
+    gs = fig.add_gridspec(ncols=3, nrows=1, width_ratios=[2, 1, 1], 
+                          hspace=0.3, wspace=0.3,
+                          top=0.92, bottom=0.15, left=0.05, right=0.95)
+    
+    # Main simulation view
+    sim_ax = fig.add_subplot(gs[0])
+    sim_ax.imshow(heightmap, cmap='terrain', extent=[0, width, 0, height], origin='lower', zorder=0)
+    
+    # Draw base station
+    sim_ax.scatter(base_station.x, base_station.y, s=400, c='cyan', marker='^', 
+                   edgecolors='black', linewidths=2, zorder=3, label="Base Station")
+    sim_ax.annotate("BS", xy=(base_station.x, base_station.y), xytext=(0, 15), 
+                    textcoords='offset points', ha='center', color='cyan', 
+                    fontweight='bold', fontsize=12)
+    
+    # Draw agents
+    for i, agent in enumerate(agents):
+        color = color_map.get(agent.id, COLORS[i % len(COLORS)])
+        sim_ax.scatter(agent.x, agent.y, s=300, zorder=2, color=color, marker="o", 
+                       edgecolors='white', linewidths=2)
+        label = chr(ord('A') + i)
+        sim_ax.annotate(label, xy=(agent.x, agent.y), ha="center", va="center", 
+                        color='white', fontweight='bold', fontsize=10)
+
+    # Draw sent packet links
+    for sender, receiver in links:
+        color = color_map.get(sender.id, 'black')
+        sim_ax.plot([sender.x, receiver.x], [sender.y, receiver.y], color=color, linewidth=2.5, alpha=0.9)
+    
+    sim_ax.set_xlim([0, width])
+    sim_ax.set_ylim([0, height])
+    sim_ax.set_title(f'DTN Simulation - Step {step}', fontweight='bold', fontsize=14)
+    sim_ax.axis('off')
+    
+    # Agent packet counts
+    packet_ax = fig.add_subplot(gs[1])
+    packet_ax.axis('off')
+    packet_ax.set_title('Agent Packet Status', fontweight='bold', fontsize=12)
+    
+    text_lines = []
+    for i, agent in enumerate(agents):
+        label = chr(ord('A') + i)
+        state = agent.payload_manager.get_state()
+        text_lines.append(f"Agent {label}: {state['num_packets']} packets (generated: {state['num_packets_generated']})")
+    
+    text_str = '\n\n'.join(text_lines)
+    packet_ax.text(0.5, 0.5, text_str, ha='center', va='center', 
+                   fontsize=11, family='monospace')
+    
+    # Base station status
+    bs_ax = fig.add_subplot(gs[2])
+    bs_ax.axis('off')
+    bs_ax.set_title('Base Station Status', fontweight='bold', fontsize=12)
+    
+    bs_state = base_station.get_state()
+    bs_text = (f"Base Station:\n\n"
+               f"Packets received: {bs_state['num_packets_received']}\n\n"
+               f"Duplicates received: {bs_state['num_duplicates_received']}")
+    
+    bs_ax.text(0.5, 0.5, bs_text, ha='center', va='center',
+               fontsize=11, family='monospace')
+    
+    # Convert to RGB array
+    canvas = FigureCanvas(fig)
+    canvas.draw()
+    data = np.frombuffer(canvas.tostring_rgb(), dtype=np.uint8)
+    frame = data.reshape(canvas.get_width_height()[::-1] + (3,))
+    plt.close(fig)
+    
+    return frame
+
+def main():
+    DATA_ROOT = '../../NASA_DCGR_NETWORKING/radio_data_2/radio_data_2'
+    HM_PATH = f'{DATA_ROOT}/hm/hm_18.npy'
+    
+    MODEL_PATHS = {
+        'k2_model': '../RadioLunaDiff/pretrained_models_network/k2unet/best_k2_model.pth',
+        'pmnet_model': '../RadioLunaDiff/pretrained_models_network/pmnet/best_pm_model.pt',
+        'diffusion_model': '../RadioLunaDiff/pretrained_models_network/diffusion'
+    }
+    
+    # load models
+    print("Loading models...")
+    try:
+        global_hm = np.load(HM_PATH)
+    except FileNotFoundError:
+        print(f"Error: Could not find {HM_PATH}. Please check path.")
+        return
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    radio_model = RadioMapModelNN(
+        model_paths=MODEL_PATHS,
+        heightmap=global_hm,
+        env_width=256, 
+        env_height=256,
+        device=device
+    )
+
+    # Environment setup
+    agents = [MarlDtnAgent(90 , 90), MarlDtnAgent(90 , 160), MarlDtnAgent(160 , 90)]
+    color_map = {agent.id: COLORS[i % len(COLORS)] for i, agent in enumerate(agents)}
+    agent_maps = {agent.id: radio_model.generate_map((agent.x, agent.y), frequency='5.8') for agent in agents}
+    
+    base_station = BaseStation(x=170.0, y=170.0)
+    frames = []
+    
+    print("Starting simulation...")
+    for step in range(50):
+        links = []
+        for agent in agents:
+            print(f'\nstep {step} - {agent.id}')
+            nearest_agent = None
+            nearest_agent_signal = -100.0
+            for target in agents + [base_station]:
+                if target.id != agent.id:
+                    signal_strength = get_signal_strength(agent_maps[agent.id], target, 256, 256)
+                    print(f"{target.id}: {signal_strength}   {nearest_agent_signal}   {signal_strength > nearest_agent_signal}")
+                    if signal_strength > nearest_agent_signal:  # Threshold for communication, taken from ROBUST THRESH DBM
+                        nearest_agent_signal = signal_strength
+                        nearest_agent = target
+
+            if nearest_agent is not None:
+                print(f"{agent.id} sending packet to {nearest_agent.id}\n")
+                agent.send_packet([nearest_agent])
+                links.append((agent, nearest_agent))
+
+            if randint(0, 1) == 1:
+                agent.generate_packet(size=50, time_to_live=100, destination=base_station.id)
+        
+        # Render frame
+        frame = render_frame(agents, base_station, global_hm, step, color_map, links)
+        frames.append(frame)
+        
+        if step % 10 == 0:
+            print(f"Step {step}: BS received {base_station.num_packets_received} packets")
+    
+    if frames:
+        print(f"Saving GIF ({len(frames)} frames)...")
+        imageio.mimsave('dtn_simulation.gif', frames, fps=4)
+        imageio.mimwrite('dtn_simulation.mp4', frames, fps=5, output_params=['-vcodec', 'libx264'])
+        print("Done!")
+
+if __name__ == "__main__":
+    main()
