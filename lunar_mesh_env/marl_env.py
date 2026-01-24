@@ -28,11 +28,13 @@ class LunarRoverMeshEnv(ParallelEnv):
                  hm_path='../radio_data_2/radio_data_2/hm/hm_18.npy',
                  radio_model: RadioMapModelNN = None,
                  num_agents=3,
+                 radio_bias=0.0,
                  render_mode=None):
         
         self.render_mode = render_mode
         self.hm_path = hm_path
         self.radio_model = radio_model
+        self.radio_bias = radio_bias
         
         # Physics constants
         self.width = 256.0 
@@ -171,7 +173,12 @@ class LunarRoverMeshEnv(ParallelEnv):
                     start_node = (int(agent.x), int(agent.y))
                     end_node = (int(gx), int(gy))
                     
-                    path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold)
+                    path = a_star_search(self.heightmap, 
+                                         self.bs_radio_map, 
+                                         start_node, 
+                                         end_node, 
+                                         per_pixel_threshold, 
+                                         self.radio_bias)
                     
                     if path:
                         agent.goal_x = gx
@@ -394,7 +401,8 @@ class LunarRoverMeshEnv(ParallelEnv):
             # so this could be changed later
             dist_delta = prev_dist - curr_dist 
             rewards[agent_id] += dist_delta * self.REWARD_DIST_SCALE
-
+            safety_factor = 0.5
+            per_pixel_threshold = (self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)) * safety_factor
             # arrival logic
             if curr_dist < (self.MAX_DIST_PER_STEP*2): 
                 rewards[agent_id] += self.REWARD_GOAL_ARRIVAL
@@ -410,7 +418,12 @@ class LunarRoverMeshEnv(ParallelEnv):
                     if dist > 50.0:
                         start_node = (int(agent.x), int(agent.y))
                         end_node = (int(gx), int(gy))
-                        path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold)
+                        path = a_star_search(self.heightmap, 
+                                             self.bs_radio_map, 
+                                             start_node, 
+                                             end_node, 
+                                             per_pixel_threshold, 
+                                             self.radio_bias)
                         
                         if path:
                             agent.goal_x = gx
