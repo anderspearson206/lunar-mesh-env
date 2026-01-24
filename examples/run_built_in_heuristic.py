@@ -5,10 +5,26 @@ import imageio
 import torch
 import sys
 import os
+import random
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from lunar_mesh_env import LunarRoverMeshEnv, RadioMapModelNN
+
+def set_seed(seed=42):
+    """Sets all possible seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
+    # Ensure deterministic behavior in CuDNN
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    # OS environment variable for hash-based operations
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    print(f"Random seed set to: {seed}")
 
 def get_combined_heuristic_action(agent_id, env):
     """
@@ -19,13 +35,15 @@ def get_combined_heuristic_action(agent_id, env):
     
     num_rovers = len(env.possible_agents)
     
-    return [move_action] + [0]*num_rovers + [1]  # Only communicate with Base Station
+    return [move_action] + [1]*num_rovers + [1]  # Only communicate with Base Station
 
 def main():
     
-    DATA_ROOT = '/mnt/2ndSSD/rm_raw_for_network'
-    # Update this path if you are running locally without the full dataset
-    HM_PATH = f'{DATA_ROOT}/hm/hm_18.npy' 
+    SEED = 67
+    set_seed(SEED)
+    
+    DATA_ROOT = '../../NASA_DCGR_NETWORKING/radio_data_2/radio_data_2'
+    HM_PATH = f'{DATA_ROOT}/hm/hm_18.npy'
     
     MODEL_PATHS = {
         'k2_model': '../RadioLunaDiff/pretrained_models_network/k2unet/best_k2_model.pth',
@@ -76,7 +94,7 @@ def main():
     print(f"Agents: {env.possible_agents}")
     print("Goal: Rovers will navigate to randomly assigned tasks (task marked as X).")
     
-    SIM_STEPS = 20
+    SIM_STEPS = 5
     
     for step in range(SIM_STEPS):
         
@@ -110,7 +128,7 @@ def main():
         out_name = 'marl_task_baseline.gif'
         print(f"\nSaving replay to {out_name} ({len(frames)} frames)...")
         imageio.mimsave(out_name, frames, fps=10)
-        imageio.mimwrite('marl_task_baseline.mp4', frames, fps=10, output_params=['-vcodec', 'libx264'])
+        imageio.mimwrite(f'marl_task_baseline_{SEED}.mp4', frames, fps=10, output_params=['-vcodec', 'libx264'])
         print("Done!")
     else:
         print("No frames captured.")

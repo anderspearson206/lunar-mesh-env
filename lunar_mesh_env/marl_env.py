@@ -15,7 +15,7 @@ from collections import defaultdict
 
 from .marl_entities import MarlMeshAgent as MeshAgent, BaseStation
 from .radio_model_nn import RadioMapModelNN
-from .pathfinding import a_star_search
+from .pathfinding import a_star_search_rm as a_star_search
 
 class LunarRoverMeshEnv(ParallelEnv):
     metadata = {
@@ -101,7 +101,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.sim_time = 0
         self.history = {"datarate": [], "energy": []}
         self.total_energy_consumed_step = 0.0
-
+        self.bs_radio_map = self.radio_model.generate_map((self.base_station.x, self.base_station.y), '5.8') if self.radio_model else None
         # Pygame
         self.window = None
         self.clock = None
@@ -151,7 +151,8 @@ class LunarRoverMeshEnv(ParallelEnv):
                     # make sure there is valid path to goal
                     start_node = (int(agent.x), int(agent.y))
                     end_node = (int(gx), int(gy))
-                    path = a_star_search(self.heightmap, start_node, end_node, per_pixel_threshold)
+                    
+                    path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold)
                     
                     if path:
                         agent.goal_x = gx
@@ -265,7 +266,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                     if dist > 50.0:
                         start_node = (int(agent.x), int(agent.y))
                         end_node = (int(gx), int(gy))
-                        path = a_star_search(self.heightmap, start_node, end_node, per_pixel_threshold)
+                        path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold)
                         
                         if path:
                             agent.goal_x = gx
