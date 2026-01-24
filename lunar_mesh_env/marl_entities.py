@@ -3,9 +3,7 @@ from typing import List, Dict, Tuple
 from abc import ABC, abstractmethod
 from .payload_manager import Packet, PayloadManager
 
-# forward-declare to avoid a circular import
-if False:
-    from .radio_model_nn import RadioMapModelNN
+from .radio_model_nn import RadioMapModelNN
 
 
 class BaseStation:
@@ -61,6 +59,8 @@ class MarlMeshDTNAgent(MarlAgent):
                  ue_id: int,
                  x: float = 0.0,
                  y: float = 0.0,
+                 heightmap: np.ndarray = None,
+                 radio_model: 'RadioMapModelNN' = None,
                  buffer_size: int = 1000, 
                  bs: BaseStation = None):        
         
@@ -75,6 +75,18 @@ class MarlMeshDTNAgent(MarlAgent):
         self.is_moving = False 
         self.total_distance = 0.0
         
+        
+                
+        self.heightmap = heightmap
+        if heightmap is None:
+            heightmap = np.zeros((2, 256), dtype=np.float32)
+            
+            
+        if radio_model is None:
+            raise ValueError("MarlMeshAgent requires a RadioMapModelNN instance.")
+        self.radio_model = radio_model
+        
+        
         # energy
         self.energy = 2000.0 
         
@@ -87,6 +99,8 @@ class MarlMeshDTNAgent(MarlAgent):
         self.bs_connected: bool = False
         
         self.payload_manager = PayloadManager(self.id, buffer_size=buffer_size)
+        
+        self.nav_path: List[Tuple[int, int]] = []  # pathfinding state
         
 
     def __str__(self):
@@ -109,7 +123,6 @@ class MarlMeshDTNAgent(MarlAgent):
 
     def update_neighbors(self, 
                         all_agents: List['MarlMeshAgent'], 
-                        radio_model, 
                         width: float, 
                         height: float, 
                         dbm_thresh: float = -100.0, 
@@ -119,7 +132,7 @@ class MarlMeshDTNAgent(MarlAgent):
         Updates the set of neighboring agents based on radio signal strength.
         """
         # get map centered at self
-        map_a = radio_model.generate_map((self.x, self.y), frequency)
+        map_a = self.radio_model.generate_map((self.x, self.y), frequency)
         self.neighbors = set()
         
         # check signal strength to all other agents and add to neighbors if above threshold
@@ -143,19 +156,17 @@ class MarlMeshDTNAgent(MarlAgent):
         """
         Updates the connection status to the base station.
         """
-        bs_rm = radio_model.generate_map((self.x, self.y), frequency)
+        bs_rm = self.radio_model.generate_map((self.base_station.x, self.base_station.y), frequency)
         dbm = self.get_signal_strength(bs_rm, self, width, height)
         self.bs_connected = dbm > dbm_thresh
         return self.bs_connected
         
     def get_local_observation(self, 
-                              env_heightmap: np.ndarray, 
-                              all_agents: List['MarlMeshAgent'],
-                              bs_location: Tuple[float, float],
-                              radio_map: np.ndarray = None) -> Dict[str, np.ndarray]:
+                              all_agents: List['MarlMeshAgent']) -> Dict[str, np.ndarray]:
         """
-        TODO
+        returns the local observation dictionary for the agent.
         """
+        
         dtn_state = self.payload_manager.get_state()
         
         # Self State (enegy, position, neighbors, DTN buffer state)
@@ -172,11 +183,12 @@ class MarlMeshDTNAgent(MarlAgent):
         
         # terrain processing
         # we expand the dimensions to add a channel dim if needed (for input to NN)
-        terrain_obs = env_heightmap.astype(np.float32)
+        terrain_obs = self.heightmap.astype(np.float32)
         if len(terrain_obs.shape) == 2:
             terrain_obs = np.expand_dims(terrain_obs, axis=0)
 
         # radio map
+        radio_map = self.radio_model.generate_map((self.x, self.y), frequency='5.8')
         if radio_map is None:
             rm_obs = np.zeros_like(terrain_obs)
         else:
@@ -205,6 +217,7 @@ class MarlMeshDTNAgent(MarlAgent):
             # Relative position
             rel_positions[i] = [other.x - self.x, other.y - self.y]
         
+        bs_location = (self.base_station.x, self.base_station.y)
         # vectors to goal and bs
         bs_obs = np.array([bs_location[0] - self.x, bs_location[1] - self.y], dtype=np.float32)
         goal_obs = np.array([self.goal_x - self.x, self.goal_y - self.y], dtype=np.float32)
@@ -264,12 +277,27 @@ class MarlMeshAgent(MarlAgent):
     def __init__(self,
                  ue_id: int,
                  x: float = 0.0,
-                 y: float = 0.0):        
+                 y: float = 0.0, 
+                 heightmap: np.ndarray = None, 
+                 radio_model: 'RadioMapModelNN' = None, 
+                 bs: BaseStation = None):        
         
         self.ue_id = ue_id
         # position (initialize at 0, will be set by env.reset)
         self.x = x
         self.y = y
+        
+        self.heightmap = heightmap
+        if heightmap is None:
+            heightmap = np.zeros((2, 256), dtype=np.float32)
+            
+            
+        if radio_model is None:
+            raise ValueError("MarlMeshAgent requires a RadioMapModelNN instance.")
+        self.radio_model = radio_model
+        
+        self.base_station = bs if bs is not None else BaseStation(0.0, 0.0)
+        
         
         self.goal_x: float = 0.0
         self.goal_y: float = 0.0
@@ -289,12 +317,15 @@ class MarlMeshAgent(MarlAgent):
     
     def receive_packet(self, packet):
         return super().receive_packet(packet)
+    
+    def update_bs_location(self, new_location: Tuple[float, float]):
+        self.bs_location = new_location
+
+    def update_heightmap(self, new_heightmap: np.ndarray):
+        self.heightmap = new_heightmap
 
     def get_local_observation(self, 
-                              env_heightmap: np.ndarray, 
-                              all_agents: List['MarlMeshAgent'],
-                              bs_location: Tuple[float, float],
-                              radio_map: np.ndarray = None) -> Dict[str, np.ndarray]:
+                              all_agents: List['MarlMeshAgent']) -> Dict[str, np.ndarray]:
         """
         Generates the agent observation dictionary.
         1. Self State
@@ -310,11 +341,14 @@ class MarlMeshAgent(MarlAgent):
             self.current_datarate
         ], dtype=np.float32)
         
-        terrain_obs = env_heightmap.astype(np.float32)
+        
+        
+        terrain_obs = self.heightmap.astype(np.float32)
         if len(terrain_obs.shape) == 2:
             terrain_obs = np.expand_dims(terrain_obs, axis=0)
 
-        # rm obs
+        # rm 
+        radio_map = self.radio_model.generate_map((self.x, self.y), frequency='5.8')
         if radio_map is None:
             # Assuming square map matching terrain size
             rm_obs = np.zeros_like(terrain_obs)
@@ -340,8 +374,8 @@ class MarlMeshAgent(MarlAgent):
         neighbors_arr = np.array(neighbor_features, dtype=np.float32)
         
         # base station vector
-        bs_dx = bs_location[0] - self.x
-        bs_dy = bs_location[1] - self.y
+        bs_dx = self.base_station.x - self.x
+        bs_dy = self.base_station.y - self.y
         bs_obs = np.array([bs_dx, bs_dy], dtype=np.float32)
         
         # goal vector
