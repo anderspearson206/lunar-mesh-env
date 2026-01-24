@@ -159,8 +159,9 @@ class LunarRoverMeshEnv(ParallelEnv):
                         agent.goal_y = gy
                         agent.nav_path = path 
                         break
-            
-        self._update_radio_cache_batch()
+                    
+        # initial radio cache update
+        self.radio_model.generate_map_batch([(self.agent_map[a].x, self.agent_map[a].y) for a in self.agents], '5.8')
 
         observations = {a: self._get_obs(a) for a in self.agents}
         infos = {a: {} for a in self.agents}
@@ -276,7 +277,8 @@ class LunarRoverMeshEnv(ParallelEnv):
             else:
                 infos[agent_id]['task_complete'] = False
 
-        self._update_radio_cache_batch()
+        # update radio cache for all agents
+        self.radio_model.generate_map_batch([(self.agent_map[a].x, self.agent_map[a].y) for a in self.agents], '5.8')
 
         # comms
         self.connections = defaultdict(set) 
@@ -293,14 +295,17 @@ class LunarRoverMeshEnv(ParallelEnv):
             move_cmd = action[0]
             comm_flags = action[1:]
             # print(comm_flags)
-            radio_map = self._get_cached_radio_map(agent)
+            radio_map = self.radio_model.generate_map((agent.x, agent.y), '5.8')
             agent.active_route = ([], '5.8')
             for i in range(num_rovers):
                 if comm_flags[i] == 1:
                     target_id = self.possible_agents[i]
                     if target_id != agent_id:
                         target_entity = self.agent_map[target_id]
-                        rssi = self._get_signal_strength(radio_map, target_entity)
+                        rssi = self.radio_model.get_signal_strength(agent.x, 
+                                                                    agent.y, 
+                                                                    target_entity.x, 
+                                                                    target_entity.y)
                         
                         if rssi > -90.0: 
                             self.connections[agent].add(target_entity)
@@ -316,7 +321,10 @@ class LunarRoverMeshEnv(ParallelEnv):
                             rewards[agent_id] += self.PENALTY_FAIL
             agent.current_datarate = 0.0
             if comm_flags[-1] == 1:
-                rssi_bs = self._get_signal_strength(radio_map, self.base_station)
+                rssi_bs = self.radio_model.get_signal_strength(agent.x, 
+                                                               agent.y, 
+                                                               self.base_station.x, 
+                                                               self.base_station.y)
                 if rssi_bs > -90.0:
                     self.connections[agent].add(self.base_station)
                     rewards[agent_id] += self.REWARD_BS_LINK
@@ -340,11 +348,11 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent = self.agent_map[agent_id]
             if agent.energy <= 0: continue
             
-            rm = self._get_cached_radio_map(agent)
+            rm = self.radio_model.generate_map((agent.x, agent.y), '5.8') 
             if rm is None: continue
 
             # bs
-            rssi_bs = self._get_signal_strength(rm, self.base_station)
+            rssi_bs = self.radio_model.get_signal_strength(agent.x, agent.y, self.base_station.x, self.base_station.y)
             if rssi_bs > -90.0:
                 self.all_visible_links.append((agent, self.base_station))
             
@@ -354,7 +362,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                 other = self.agent_map[other_id]
                 if other.energy <= 0: continue
 
-                rssi_other = self._get_signal_strength(rm, other)
+                rssi_other = self.radio_model.get_signal_strength(agent.x, agent.y, other.x, other.y)
                 if rssi_other > -90.0:
                      self.all_visible_links.append((agent, other))
 
@@ -489,71 +497,14 @@ class LunarRoverMeshEnv(ParallelEnv):
             
         return True
     
-    def _update_radio_cache_batch(self):
-        """
-        Updates the radio maps for all active agents in a single batch.
-        Checks cache first to avoid re-generating maps for stationary agents.
-        """
-        if not self.radio_model:
-            return
-
-        needed_indices = []
-        needed_positions = []
-        needed_ids = []
-
-        # find which agents need new maps
-        for agent_id in self.agents:
-            agent = self.agent_map[agent_id]
-            
-            key = (int(agent.x), int(agent.y), '5.8') 
-            
-            if key not in self.radio_cache:
-                needed_ids.append(agent_id)
-                needed_positions.append((agent.x, agent.y))
-
-        # batch inference
-        if len(needed_positions) > 0:
-            new_maps = self.radio_model.generate_map_batch(needed_positions, '5.8')
-            
-            # update cache
-            for i, agent_id in enumerate(needed_ids):
-                agent = self.agent_map[agent_id]
-                key = (int(agent.x), int(agent.y), '5.8')
-                self.radio_cache[key] = new_maps[i]
-
-    def _get_cached_radio_map(self, agent):
-        """Retrieves map from cache. Assumes _update_radio_cache_batch was called."""
-        grid_pos = (int(agent.x), int(agent.y), '5.8')
-        return self.radio_cache.get(grid_pos, None)
-
-
-    def _get_radio_map(self, agent):
-        """Cached Neural Network Inference"""
-        grid_pos = (int(agent.x), int(agent.y), '5.8') 
-        
-        if grid_pos not in self.radio_cache:
-            if self.radio_model:
-                self.radio_cache[grid_pos] = self.radio_model.generate_map((agent.x, agent.y), '5.8')
-            else:
-                return None
-        return self.radio_cache[grid_pos]
-
-    def _get_signal_strength(self, radio_map, target_agent):
-        """Gets the signal strength (dBm) from a given radio_map at target's location."""
-        if radio_map is None: return -150.0
-        r_idx = int((target_agent.y / self.height) * (radio_map.shape[0]-1))
-        c_idx = int((target_agent.x / self.width) * (radio_map.shape[1]-1))
-        r_idx = np.clip(r_idx, 0, radio_map.shape[0]-1)
-        c_idx = np.clip(c_idx, 0, radio_map.shape[1]-1)
-        return radio_map[r_idx, c_idx]
+    
 
     def _get_obs(self, agent_id):
         agent = self.agent_map[agent_id]
         all_agents = list(self.agent_map.values())
         bs_loc = self.base_station.get_position()
-        current_rm = self._get_cached_radio_map(agent)
+        current_rm = self.radio_model.generate_map((agent.x, agent.y), '5.8') if self.radio_model else None
         
-        current_rm = self._get_cached_radio_map(agent)
     
         if current_rm is None:
             print("Warning: Radio map is None, returning default safe map.")
@@ -576,11 +527,11 @@ class LunarRoverMeshEnv(ParallelEnv):
             if target_id == agent_id:
                 comm_masks.append([1.0, 0.0]) # Cannot comm with self
                 continue
-            rssi = self._get_signal_strength(current_rm, self.agent_map[target_id])
+            rssi = self.radio_model.get_signal_strength(agent.x, agent.y, self.agent_map[target_id].x, self.agent_map[target_id].y)
             comm_masks.append([1.0, 1.0] if rssi > -90.0 else [1.0, 0.0])
         
         # Base Station target
-        rssi_bs = self._get_signal_strength(current_rm, self.base_station)
+        rssi_bs = self.radio_model.get_signal_strength(agent.x, agent.y, self.base_station.x, self.base_station.y)
         comm_masks.append([1.0, 1.0] if rssi_bs > -90.0 else [1.0, 0.0])
         obs_dict["action_mask"] = np.concatenate([move_mask, np.array(comm_masks).flatten()]).astype(np.int8)
         
@@ -671,7 +622,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             if agent_id in self.agent_map:
                 agent = self.agent_map[agent_id]
                 if agent.energy > 0:
-                    radio_map = self._get_cached_radio_map(agent)
+                    radio_map = self.radio_model.generate_map((agent.x, agent.y), '5.8')
                     label_char = chr(ord('A') + i) 
                     self.render_radio_map(map_ax, radio_map, f"Radio Map (Agent {label_char})")
                 else:
@@ -835,3 +786,67 @@ class LunarRoverMeshEnv(ParallelEnv):
         ax.set_xlabel("Step")
         ax.set_xlim([0, self.EP_MAX_TIME])
         ax.set_ylim([0, 100])
+        
+        
+        
+        
+
+    # DEPRECATED RADIO CACHE METHODS 
+    # ################################# 
+    #  def _update_radio_cache_batch(self):
+    #     """
+    #     Updates the radio maps for all active agents in a single batch.
+    #     Checks cache first to avoid re-generating maps for stationary agents.
+    #     """
+    #     if not self.radio_model:
+    #         return
+
+    #     needed_indices = []
+    #     needed_positions = []
+    #     needed_ids = []
+
+    #     # find which agents need new maps
+    #     for agent_id in self.agents:
+    #         agent = self.agent_map[agent_id]
+            
+    #         key = (int(agent.x), int(agent.y), '5.8') 
+            
+    #         if key not in self.radio_cache:
+    #             needed_ids.append(agent_id)
+    #             needed_positions.append((agent.x, agent.y))
+
+    #     # batch inference
+    #     if len(needed_positions) > 0:
+    #         new_maps = self.radio_model.generate_map_batch(needed_positions, '5.8')
+            
+    #         # update cache
+    #         for i, agent_id in enumerate(needed_ids):
+    #             agent = self.agent_map[agent_id]
+    #             key = (int(agent.x), int(agent.y), '5.8')
+    #             self.radio_cache[key] = new_maps[i]
+
+    # def _get_cached_radio_map(self, agent):
+    #     """Retrieves map from cache. Assumes _update_radio_cache_batch was called."""
+    #     grid_pos = (int(agent.x), int(agent.y), '5.8')
+    #     return self.radio_cache.get(grid_pos, None)
+
+
+    # def _get_radio_map(self, agent):
+    #     """Cached Neural Network Inference"""
+    #     grid_pos = (int(agent.x), int(agent.y), '5.8') 
+        
+    #     if grid_pos not in self.radio_cache:
+    #         if self.radio_model:
+    #             self.radio_cache[grid_pos] = self.radio_model.generate_map((agent.x, agent.y), '5.8')
+    #         else:
+    #             return None
+    #     return self.radio_cache[grid_pos]
+
+    # def _get_signal_strength(self, radio_map, target_agent):
+    #     """Gets the signal strength (dBm) from a given radio_map at target's location."""
+    #     if radio_map is None: return -150.0
+    #     r_idx = int((target_agent.y / self.height) * (radio_map.shape[0]-1))
+    #     c_idx = int((target_agent.x / self.width) * (radio_map.shape[1]-1))
+    #     r_idx = np.clip(r_idx, 0, radio_map.shape[0]-1)
+    #     c_idx = np.clip(c_idx, 0, radio_map.shape[1]-1)
+    #     return radio_map[r_idx, c_idx]

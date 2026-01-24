@@ -286,6 +286,9 @@ class MarlMeshAgent(MarlAgent):
 
     def __str__(self):
         return f"MeshAgent_{self.ue_id}"
+    
+    def receive_packet(self, packet):
+        return super().receive_packet(packet)
 
     def get_local_observation(self, 
                               env_heightmap: np.ndarray, 

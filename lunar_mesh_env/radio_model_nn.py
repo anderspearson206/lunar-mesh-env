@@ -39,6 +39,8 @@ class RadioMapModelNN:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # print(f"Using device: {self.device}")
 
+
+        self.cache = {}
         self.image_size = image_size
         self.width = env_width
         self.height = env_height
@@ -106,90 +108,78 @@ class RadioMapModelNN:
         
         # print("RadioMapModel initialized and ready.")
 
+    def _get_cache_key(self, x, y, frequency):
+        """Standardizes the key for the internal dictionary."""
+        return (int(x), int(y), str(frequency))
+
+    def get_signal_strength(self, ox:float, oy: float, tx: float, ty: float, freq: str = '5.8') -> float:
+        """
+        Calculates signal strength at (tx, ty) from a provided radio_map at pos
+        (ox, oy).
+        """
+        radio_map = self.generate_map((ox, oy), freq)
+        
+        if radio_map is None: 
+            return -150.0
+            
+        # map world coords to pixel indices
+        r_idx = int((ty / self.height) * (radio_map.shape[0] - 1))
+        c_idx = int((tx / self.width) * (radio_map.shape[1] - 1))
+        
+        r_idx = np.clip(r_idx, 0, radio_map.shape[0] - 1)
+        c_idx = np.clip(c_idx, 0, radio_map.shape[1] - 1)
+        
+        return float(radio_map[r_idx, c_idx])
+
+    def _get_cached_map(self, x: float, y: float, frequency: str):
+        """Retrieves a map if the quantized position exists in cache."""
+        key = (int(x), int(y), frequency)
+        return self.cache.get(key, None)
+
+    def _add_to_cache(self, x: float, y: float, frequency: str, radio_map: np.ndarray):
+        """Stores a generated map into the internal cache."""
+        key = (int(x), int(y), frequency)
+        self.cache[key] = radio_map
+
+    def clear_cache(self):
+        self.cache = {}
+        
+    
     def _denormalize(self, tensor):
         """Converts a tensor from the [-1, 1] range back to the [0, 1] range."""
         return (tensor.clamp(-1, 1) + 1.0) / 2.0
 
     def generate_map(self, tx_pos: Tuple[float, float], frequency: str) -> np.ndarray:
-        """
-        Generates a radiomap for a given transmitter position and frequency.
-        """
-        if self.dummy_mode:
-            # 1/r^2 for testing purposes
-            Y, X = np.ogrid[:256, :256]
-            dist_sq = (X - tx_pos[0])**2 + (Y - tx_pos[1])**2
-            dist_sq[dist_sq == 0] = 1.0 
-            dummy_dbm = -10 - 20 * np.log10(dist_sq)
-            return np.clip(dummy_dbm, -150, 0)
-        
-        
-        with torch.no_grad():
-        
-            tx_map = self.processor.create_tx_map(
-                tx_pos, self.width, self.height, self.device
-            ) 
-            
-            freq_map = self.processor.create_freq_map(
-                frequency, self.device
-            ) 
-            
-            unnorm_inputs = torch.stack([
-                self.static_hm_tensor,     
-                tx_map,                    
-                freq_map,                  
-                self.static_fhm_tensor     
-            ]).unsqueeze(0)
-            
-            k2_inputs = unnorm_inputs.clone()
-            pm_inputs = unnorm_inputs.clone()
+        """Wrapper for generate_map_batch to handle single requests via cache."""
+        return self.generate_map_batch([tx_pos], frequency)[0]
 
-            conditioning_maps = self.normalize_transform(
-                unnorm_inputs.squeeze(0) 
-            ).unsqueeze(0)
-
-            # run inference pipeline
-  
-            k2_map_pred = torch.sigmoid(self.k2_model(k2_inputs))
-            
-            pm_inputs_cat = torch.cat([pm_inputs, k2_map_pred.clone()], dim=1) 
-            pm_pred = self.pmnet(pm_inputs_cat)
-
-            pm_pred_norm = self.normalize_transform_single(pm_pred)
-            k2_map_norm = self.normalize_transform_single(k2_map_pred)
-            
-            generated_images = torch.randn(
-                (1, 1, self.image_size, self.image_size),
-                device=self.device
-            )
-            
-            for t in self.noise_scheduler.timesteps:
-                model_input = torch.cat([
-                    generated_images,       
-                    conditioning_maps,      
-                    pm_pred_norm,           
-                    k2_map_norm             
-                ], dim=1) 
-                
-                noise_pred = self.model(model_input, t, return_dict=False)[0]
-                generated_images = self.noise_scheduler.step(
-                    noise_pred, t, generated_images, return_dict=False
-                )[0]
-
-            
-            final_gen_norm = pm_pred_norm + generated_images 
-            
-            final_gen_0_1 = self._denormalize(final_gen_norm)
-            
-            output_map_0_1 = final_gen_0_1.squeeze().cpu().numpy()
-            
-            # convert back to correct range based on oriinal training
-            # dataloaders
-            output_dbm = (output_map_0_1 * 210.0) - 200.0
-            # print(f"Generated radiomap at tx_pos={tx_pos}, frequency={frequency}")
-            return output_dbm
-        
-        
+         
     def generate_map_batch(self, tx_positions: List[Tuple[float, float]], frequency: str) -> np.ndarray:
+        """Processes a batch while skipping positions already in the cache."""
+        results = [None] * len(tx_positions)
+        needed_indices = []
+        needed_pos = []
+
+        for i, pos in enumerate(tx_positions):
+            key = self._get_cache_key(*pos, frequency)
+            if key in self.cache:
+                results[i] = self.cache[key]
+            else:
+                needed_indices.append(i)
+                needed_pos.append(pos)
+
+        if needed_pos:
+            new_maps = self._run_batch_inference(needed_pos, frequency)
+            # map generated maps back to original results indices and update cache
+            for idx, pos, m in zip(needed_indices, needed_pos, new_maps):
+                key = self._get_cache_key(*pos, frequency)
+                self.cache[key] = m
+                results[idx] = m
+
+        return np.array(results)
+    
+        
+    def _run_batch_inference(self, tx_positions: List[Tuple[float, float]], frequency: str) -> np.ndarray:
         """
         Generates a batch of radiomaps for a list of transmitter positions.
         
@@ -283,6 +273,100 @@ class RadioMapModelNN:
             
             # convert back to correct range based on oriinal training
             # dataloaders
-            output_dbm = (output_map_0_1 * 210.0) - 200.0
+            output_dbm = (output_map_0_1 * 210.0) - 200.0 
             # print(f"Generated batch of {batch_size} radiomaps at frequency={frequency}")
             return output_dbm
+       
+       
+       
+       
+       
+       
+        
+    # DEPRECATED single-map generation method
+    def _generate_map(self, tx_pos: Tuple[float, float], frequency: str) -> np.ndarray:
+        """
+        Generates a radiomap for a given transmitter position and frequency.
+        """
+        
+        key= self._get_cache_key(tx_pos[0], tx_pos[1], frequency)
+        if key in self.cache:
+            return self._get_cached_map(tx_pos[0], tx_pos[1], frequency)
+        
+        
+        if self.dummy_mode:
+            # 1/r^2 for testing purposes
+            Y, X = np.ogrid[:256, :256]
+            dist_sq = (X - tx_pos[0])**2 + (Y - tx_pos[1])**2
+            dist_sq[dist_sq == 0] = 1.0 
+            dummy_dbm = -10 - 20 * np.log10(dist_sq)
+            return np.clip(dummy_dbm, -150, 0)
+        
+        
+        with torch.no_grad():
+        
+            tx_map = self.processor.create_tx_map(
+                tx_pos, self.width, self.height, self.device
+            ) 
+            
+            freq_map = self.processor.create_freq_map(
+                frequency, self.device
+            ) 
+            
+            unnorm_inputs = torch.stack([
+                self.static_hm_tensor,     
+                tx_map,                    
+                freq_map,                  
+                self.static_fhm_tensor     
+            ]).unsqueeze(0)
+            
+            k2_inputs = unnorm_inputs.clone()
+            pm_inputs = unnorm_inputs.clone()
+
+            conditioning_maps = self.normalize_transform(
+                unnorm_inputs.squeeze(0) 
+            ).unsqueeze(0)
+
+            # run inference pipeline
+  
+            k2_map_pred = torch.sigmoid(self.k2_model(k2_inputs))
+            
+            pm_inputs_cat = torch.cat([pm_inputs, k2_map_pred.clone()], dim=1) 
+            pm_pred = self.pmnet(pm_inputs_cat)
+
+            pm_pred_norm = self.normalize_transform_single(pm_pred)
+            k2_map_norm = self.normalize_transform_single(k2_map_pred)
+            
+            generated_images = torch.randn(
+                (1, 1, self.image_size, self.image_size),
+                device=self.device
+            )
+            
+            for t in self.noise_scheduler.timesteps:
+                model_input = torch.cat([
+                    generated_images,       
+                    conditioning_maps,      
+                    pm_pred_norm,           
+                    k2_map_norm             
+                ], dim=1) 
+                
+                noise_pred = self.model(model_input, t, return_dict=False)[0]
+                generated_images = self.noise_scheduler.step(
+                    noise_pred, t, generated_images, return_dict=False
+                )[0]
+
+            
+            final_gen_norm = pm_pred_norm + generated_images 
+            
+            final_gen_0_1 = self._denormalize(final_gen_norm)
+            
+            output_map_0_1 = final_gen_0_1.squeeze().cpu().numpy()
+            
+            # convert back to correct range based on oriinal training
+            # dataloaders
+            output_dbm = (output_map_0_1 * 210.0) - 200.0
+            self._add_to_cache(tx_pos[0], tx_pos[1], frequency, output_dbm)
+            # print(f"Generated radiomap at tx_pos={tx_pos}, frequency={frequency}")
+            return output_dbm
+        
+        
