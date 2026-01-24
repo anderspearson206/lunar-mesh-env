@@ -50,6 +50,212 @@ class MarlAgent(ABC):
     @abstractmethod
     def receive_packet(self, packet:Packet):
         pass
+    
+    
+    
+class MarlMeshDTNAgent(MarlAgent):
+    """
+    A rover agent with full communication capabilities using DTN logic and movement logic.
+    """
+    def __init__(self,
+                 ue_id: int,
+                 x: float = 0.0,
+                 y: float = 0.0,
+                 buffer_size: int = 1000, 
+                 bs: BaseStation = None):        
+        
+        self.ue_id = ue_id 
+        self.id = f"MarlAgent_{ue_id}" 
+        
+        # position and movement state
+        self.x = x
+        self.y = y
+        self.goal_x: float = 0.0
+        self.goal_y: float = 0.0
+        self.is_moving = False 
+        self.total_distance = 0.0
+        
+        # energy
+        self.energy = 2000.0 
+        
+        # dtn logic
+        self.neighbors: set['MarlAgent'] = set()
+        
+        bs = bs if bs is not None else BaseStation(0.0, 0.0)
+        self.base_station = bs
+        
+        self.bs_connected: bool = False
+        
+        self.payload_manager = PayloadManager(self.id, buffer_size=buffer_size)
+        
+
+    def __str__(self):
+        return self.id
+
+    def __lt__(self, other):
+        """Allows auto-sorting by ue_id."""
+        if not isinstance(other, MarlMeshDTNAgent):
+            return NotImplemented
+        return self.ue_id < other.ue_id
+    
+    def receive_packet(self, packet: Packet):
+        self.payload_manager.receive_packet(packet)
+
+    def send_packet(self, targets: List[MarlAgent|BaseStation]):
+        self.payload_manager.send_packet(targets)
+
+    def generate_packet(self, size: int, time_to_live: float, destination: str):
+        self.payload_manager.generate_packet(size, time_to_live, destination)
+
+    def update_neighbors(self, 
+                        all_agents: List['MarlMeshAgent'], 
+                        radio_model, 
+                        width: float, 
+                        height: float, 
+                        dbm_thresh: float = -100.0, 
+                        frequency: str = '5.8'
+                       ) -> set['MarlMeshAgent']:
+        """
+        Updates the set of neighboring agents based on radio signal strength.
+        """
+        # get map centered at self
+        map_a = radio_model.generate_map((self.x, self.y), frequency)
+        self.neighbors = set()
+        
+        # check signal strength to all other agents and add to neighbors if above threshold
+        for agent in all_agents:
+            if agent.ue_id == self.ue_id:
+                continue
+                
+            dbm = self.get_signal_strength(map_a, agent, width, height)
+            if dbm > dbm_thresh:
+                self.neighbors.add(agent)
+        
+        return self.neighbors
+
+    def update_bs_connection(self, 
+                             radio_model,
+                             width: float,
+                             height: float,
+                             dbm_thresh: float = -100.0,
+                             frequency: str = '5.8'
+                            ) -> bool:
+        """
+        Updates the connection status to the base station.
+        """
+        bs_rm = radio_model.generate_map((self.x, self.y), frequency)
+        dbm = self.get_signal_strength(bs_rm, self, width, height)
+        self.bs_connected = dbm > dbm_thresh
+        return self.bs_connected
+        
+    def get_local_observation(self, 
+                              env_heightmap: np.ndarray, 
+                              all_agents: List['MarlMeshAgent'],
+                              bs_location: Tuple[float, float],
+                              radio_map: np.ndarray = None) -> Dict[str, np.ndarray]:
+        """
+        TODO
+        """
+        dtn_state = self.payload_manager.get_state()
+        
+        # Self State (enegy, position, neighbors, DTN buffer state)
+        # I think the normalized buffer usage is better than both the buffer size (doesnt change)
+        # and the total payload size seperately. I also don't think we need to keep track of the 
+        # number of packets generated, but we can keep it in the payload manager state for logging.
+        my_state = np.array([
+            self.energy, 
+            self.x, 
+            self.y, 
+            dtn_state["payload_size"] / dtn_state["buffer_size"], 
+            float(dtn_state["num_packets"])
+        ], dtype=np.float32)
+        
+        # terrain processing
+        # we expand the dimensions to add a channel dim if needed (for input to NN)
+        terrain_obs = env_heightmap.astype(np.float32)
+        if len(terrain_obs.shape) == 2:
+            terrain_obs = np.expand_dims(terrain_obs, axis=0)
+
+        # radio map
+        if radio_map is None:
+            rm_obs = np.zeros_like(terrain_obs)
+        else:
+            rm_obs = radio_map.astype(np.float32)
+            if len(rm_obs.shape) == 2:
+                rm_obs = np.expand_dims(rm_obs, axis=0)
+
+        # neighbor relative positions
+        # the neighbor positions are different than the set of connected neighbors above
+        # these are also stored as relative positions (works better for RL)
+        num_others = len(all_agents)
+        connectivity = np.zeros(num_others + 1, dtype=np.float32)
+        rel_positions = np.zeros((num_others + 1, 2), dtype=np.float32)
+
+        # for all rovers
+        all_agents = sorted(all_agents, key=lambda a: a.ue_id)
+        for i, other in enumerate(all_agents):
+            if other.ue_id == self.ue_id:
+                # always 0 for self (already initialized to zero)
+                continue
+            
+            # check connectivity
+            if other in self.neighbors:
+                connectivity[i] = 1.0
+            
+            # Relative position
+            rel_positions[i] = [other.x - self.x, other.y - self.y]
+        
+        # vectors to goal and bs
+        bs_obs = np.array([bs_location[0] - self.x, bs_location[1] - self.y], dtype=np.float32)
+        goal_obs = np.array([self.goal_x - self.x, self.goal_y - self.y], dtype=np.float32)
+        
+        bs_idx = -1
+        # the bs_connected should be updated every environment step before calling this
+        # (or after??)
+        if self.bs_connected:
+            connectivity[bs_idx] = 1.0
+        rel_positions[bs_idx] = [bs_location[0] - self.x, bs_location[1] - self.y]
+
+        # updating this to unpack everything into the observation dict
+        return {
+            "energy": self.energy,
+            "position": np.array([self.x, self.y], dtype=np.float32),
+            "buffer_usage": np.array([dtn_state["payload_size"] / dtn_state["buffer_size"]], dtype=np.float32),
+            "num_packets": np.array([dtn_state["num_packets"]], dtype=np.float32),
+            "other_agent_vectors": rel_positions,
+            "other_agent_connectivity": connectivity,
+            "goal_vector": goal_obs,
+            "terrain": terrain_obs,
+            "radio_map": rm_obs
+        }
+
+    @staticmethod
+    def get_signal_strength(radio_map, target_agent, width, height):
+        if radio_map is None: return -np.inf 
+        map_shape = radio_map.shape
+        col_idx = int((target_agent.x / width) * (map_shape[1] - 1))
+        row_idx = int((target_agent.y / height) * (map_shape[0] - 1))
+        col_idx = np.clip(col_idx, 0, map_shape[1] - 1)
+        row_idx = np.clip(row_idx, 0, map_shape[0] - 1)
+        return radio_map[row_idx, col_idx]
+
+
+
+
+
+
+
+
+
+
+"""
+|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+||||||||||||||||||| BELOW IS DEPRECATED/LEGACY CODE |||||||||||||||||||||||||
+|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+"""
+
+
+
 
 class MarlMeshAgent(MarlAgent):
     """
@@ -168,6 +374,8 @@ class MarlMeshAgent(MarlAgent):
         
         return radio_map[row_idx, col_idx]
 
+
+    # UNUSED
     def heuristic_resolve_route(self,
                              target_agent: 'MarlMeshAgent', 
                              all_agents: List['MarlMeshAgent'], 
@@ -206,6 +414,7 @@ class MarlMeshAgent(MarlAgent):
         self.current_datarate = 0.0
         return {} 
 
+    # UNUSED
     def find_route(self, 
                    target_agent: 'MarlMeshAgent', 
                    all_agents: List['MarlMeshAgent'], 
@@ -248,7 +457,7 @@ class MarlDtnAgent(MarlAgent):
                  x: float = 0.0,
                  y: float = 0.0):        
         
-        self.id = f'DTN_{MarlDtnAgent.counter}'
+        self.id = f'MeshAgent_{MarlDtnAgent.counter}'
         MarlDtnAgent.counter += 1
         
         # Position (initialize at provided values, will be set by env.reset)
@@ -271,14 +480,14 @@ class MarlDtnAgent(MarlAgent):
         self.payload_manager.generate_packet(size, time_to_live, destination)
 
 
-    def find_neighbors(self, 
+    def update_neighbors(self, 
                    agents: List['MarlDtnAgent'], 
                    radio_model, 
                    width: float, 
                    height: float, 
                    dbm_thresh: float, 
                    frequency: str
-                  ) -> List[Tuple['MarlDtnAgent', 'MarlDtnAgent']]:
+                  ) -> set['MarlDtnAgent']:
         
         map_a = radio_model.generate_map((self.x, self.y), frequency)
         self.neighbors = set()
