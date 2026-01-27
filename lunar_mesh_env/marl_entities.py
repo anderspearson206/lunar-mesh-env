@@ -15,7 +15,7 @@ class BaseStation:
         self.y = y
         self.height = height # bs could be higher than rovers, 
         # but we'd have to retrain the model for that.
-        # Can we use the 3m height model for BS? used in RLD paper?
+        # Can we use the 3m height model for BS used in RLD paper?
         self.id = "BS_0"  
         self.num_packets_received = 0
         self.num_duplicates_received = 0
@@ -121,18 +121,21 @@ class MarlMeshDTNAgent(MarlAgent):
     def generate_packet(self, size: int, time_to_live: float, destination: str):
         self.payload_manager.generate_packet(size, time_to_live, destination)
 
+    def drop_expired_packets(self):
+        self.payload_manager.drop_expired_packets()
+    
     def update_neighbors(self, 
                         all_agents: List['MarlMeshAgent'], 
                         width: float, 
                         height: float, 
-                        dbm_thresh: float = -100.0, 
+                        dbm_thresh: float = -90.0, 
                         frequency: str = '5.8'
                        ) -> set['MarlMeshAgent']:
         """
         Updates the set of neighboring agents based on radio signal strength.
         """
         # get map centered at self
-        map_a = self.radio_model.generate_map((self.x, self.y), frequency)
+        # map_a = self.radio_model.generate_map((self.x, self.y), frequency)
         self.neighbors = set()
         
         # check signal strength to all other agents and add to neighbors if above threshold
@@ -140,7 +143,7 @@ class MarlMeshDTNAgent(MarlAgent):
             if agent.ue_id == self.ue_id:
                 continue
                 
-            dbm = self.get_signal_strength(map_a, agent, width, height)
+            dbm = self.radio_model.get_signal_strength(self.x, self.y, agent.x, agent.y, frequency)
             if dbm > dbm_thresh:
                 self.neighbors.add(agent)
         
@@ -150,14 +153,15 @@ class MarlMeshDTNAgent(MarlAgent):
                              radio_model,
                              width: float,
                              height: float,
-                             dbm_thresh: float = -100.0,
+                             dbm_thresh: float = -90.0,
                              frequency: str = '5.8'
                             ) -> bool:
         """
         Updates the connection status to the base station.
         """
-        bs_rm = self.radio_model.generate_map((self.base_station.x, self.base_station.y), frequency)
-        dbm = self.get_signal_strength(bs_rm, self, width, height)
+
+        dbm = self.radio_model.get_signal_strength(self.base_station.x, self.base_station.y, self.x, self.y, frequency)
+
         self.bs_connected = dbm > dbm_thresh
         return self.bs_connected
         
@@ -242,15 +246,7 @@ class MarlMeshDTNAgent(MarlAgent):
             "radio_map": rm_obs
         }
 
-    @staticmethod
-    def get_signal_strength(radio_map, target_agent, width, height):
-        if radio_map is None: return -np.inf 
-        map_shape = radio_map.shape
-        col_idx = int((target_agent.x / width) * (map_shape[1] - 1))
-        row_idx = int((target_agent.y / height) * (map_shape[0] - 1))
-        col_idx = np.clip(col_idx, 0, map_shape[1] - 1)
-        row_idx = np.clip(row_idx, 0, map_shape[0] - 1)
-        return radio_map[row_idx, col_idx]
+
 
 
 

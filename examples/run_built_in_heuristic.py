@@ -18,28 +18,55 @@ def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     
-    # Ensure deterministic behavior in CuDNN
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    
-    # OS environment variable for hash-based operations
+
     os.environ['PYTHONHASHSEED'] = str(seed)
     print(f"Random seed set to: {seed}")
 
 def get_combined_heuristic_action(agent_id, env):
     """
-    Combines the environment's built-in movement heuristic (Goal Seeking)
-    with a simple communication heuristic (Always try to talk to Base Station).
+    Implements a dumb epidemic plus the built in pathfinding heuristic for movement.
     """
+    agent = env.agent_map[agent_id]
     move_action = env.heuristic_move_action(agent_id)
     
+  
     num_rovers = len(env.possible_agents)
+    comm_actions = [0] * (num_rovers + 1)
+    packet_sent = False
+    target_index = None
     
-    return [move_action] + [1]*num_rovers + [1]  # Only communicate with Base Station
+    # epidemic
+    if len(agent.payload_manager.buffer) > 0:
+        # just try to send next packet
+        next_packet = agent.payload_manager.buffer[0]
+        
+        for i, target_id in enumerate(env.possible_agents):
+            if target_id == agent_id:
+                target_index = i
+                
+            
+            target_agent = env.agent_map[target_id]
+            # ff the rover is a neighbor and hasn't seen this packet yet
+            if target_agent in agent.neighbors:
+                if target_agent.id not in next_packet.touched:
+                    comm_actions[i] = 1
+                    packet_sent = True
+                    
+        if packet_sent:
+            # send back to self as a duplicate to preserve buffer
+            comm_actions[target_index] = 1
+
+    # always offload to ba
+    if agent.bs_connected:
+        comm_actions[-1] = 1
+
+    return [move_action] + comm_actions
 
 def main():
     
-    SEED = 67
+    SEED = 2002
     set_seed(SEED)
     
     DATA_ROOT = '../../NASA_DCGR_NETWORKING/radio_data_2/radio_data_2'
@@ -72,7 +99,7 @@ def main():
             env_width=256, 
             env_height=256,
             num_inference_steps=4,
-            dummy_mode=False,
+            dummy_mode=True,
             device=device
             
         )
@@ -84,7 +111,7 @@ def main():
         hm_path=HM_PATH,
         radio_model=radio_model,
         num_agents=3, 
-        render_mode="rgb_array" 
+        render_mode="human" 
     )
     
     obs, info = env.reset()
@@ -94,7 +121,7 @@ def main():
     print(f"Agents: {env.possible_agents}")
     print("Goal: Rovers will navigate to randomly assigned tasks (task marked as X).")
     
-    SIM_STEPS = 5
+    SIM_STEPS = 300
     
     for step in range(SIM_STEPS):
         

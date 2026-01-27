@@ -31,6 +31,28 @@ class PayloadManager:
             self.payload_size -= packet.size
             for target in targets:
                 target.receive_packet(packet)
+                
+                
+                
+    # we may not need this and can instead just call send packet to self
+    def send_and_duplicate_packet(self, targets):
+        if len(self.buffer) > 0:
+            packet = self.buffer.popleft()
+            self.buffer.appendleft(packet)  
+            for target in targets:
+                target.receive_packet(packet)
+                
+    def drop_expired_packets(self):
+        current_time = time()
+        while len(self.buffer) > 0:
+            packet = self.buffer[0]
+            if current_time - packet.timestamp > packet.time_to_live:
+                # print(f"Packet {packet.packet_id} expired and dropped from agent {self.id}'s buffer.")
+                # print(f"Time in buffer: {current_time - packet.timestamp:.2f}s, TTL: {packet.time_to_live}s")
+                self.buffer.popleft()
+                self.payload_size -= packet.size
+            else:
+                break
     
     def receive_packet(self, packet:Packet):
         while packet.size + self.payload_size > self.buffer_size:

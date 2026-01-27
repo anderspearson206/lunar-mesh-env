@@ -39,13 +39,16 @@ class LunarRoverMeshEnv(ParallelEnv):
         # Physics constants
         self.width = 256.0 
         self.height = 256.0
+        
+        # this was pulled from the cadre 
         self.ROVER_SPEED = 0.2
+        # 
         self.STEP_LENGTH = 20
         self.METERS_PER_PIXEL = 1.0
         self.MAX_DIST_PER_STEP = (self.ROVER_SPEED * self.STEP_LENGTH) / self.METERS_PER_PIXEL
         
         # restricts movement on steep inclines
-        self.MAX_INCLINE_PER_STEP = self.MAX_DIST_PER_STEP*0.2
+        self.MAX_INCLINE_PER_STEP = self.MAX_DIST_PER_STEP*0.25
         
         
         # Energy & Rewards
@@ -70,7 +73,7 @@ class LunarRoverMeshEnv(ParallelEnv):
 
 
         # DTN config
-        self.PACKET_GEN_PROB = 0.95  
+        self.PACKET_GEN_PROB = 0.5
         self.REWARD_PACKET_DELIVERY = 20.0 
         self.PENALTY_BUFFER_OVERFLOW = -5.0
         
@@ -235,6 +238,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent = self.agent_map[agent_id]
             if agent.energy <= 0: continue
             
+            agent.drop_expired_packets()
             # random packet generation
             if np.random.rand() < self.PACKET_GEN_PROB:
                 agent.generate_packet(size=10, time_to_live=50, destination="BS_0")
@@ -326,6 +330,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         
         return observations, rewards, terminations, truncations, infos
 
+    # _handle_communication_step(self, actions, rewards, infos):
+        
 
 
     def _handle_movement_step(self, actions, rewards, infos):
@@ -404,18 +410,23 @@ class LunarRoverMeshEnv(ParallelEnv):
             safety_factor = 0.5
             per_pixel_threshold = (self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)) * safety_factor
             # arrival logic
-            if curr_dist < (self.MAX_DIST_PER_STEP*2): 
+            # print(agent)
+            # print(curr_dist)
+            # print(self.MAX_DIST_PER_STEP*4.0)
+                
+            if curr_dist < (self.MAX_DIST_PER_STEP*1.5): 
                 rewards[agent_id] += self.REWARD_GOAL_ARRIVAL
                 infos[agent_id]['task_complete'] = True
+                print(f"Agent {agent_id} completed its task!")
                 
                 # respawn
-                max_retries = 20
+                max_retries = 100
                 for _ in range(max_retries):
                     gx = np.random.uniform(0, self.width)
                     gy = np.random.uniform(0, self.height)
                     dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
                     
-                    if dist > 50.0:
+                    if dist > 25.0:
                         start_node = (int(agent.x), int(agent.y))
                         end_node = (int(gx), int(gy))
                         path = a_star_search(self.heightmap, 
@@ -432,7 +443,11 @@ class LunarRoverMeshEnv(ParallelEnv):
                             break
             else:
                 infos[agent_id]['task_complete'] = False
-
+            
+        return actions, rewards, infos    
+            
+                
+            
     def heuristic_move_action(self, agent_id):
         """
         picks movement action based on pure pursuit to follow the precomputed path
@@ -552,7 +567,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         #comm masks for peers
         for target_id in self.possible_agents:
             if target_id == agent_id:
-                comm_masks.append([1, 0]) # can't send to self
+                comm_masks.append([1, 1]) # can always send to self
                 continue
             
             target_rover = self.agent_map[target_id]
@@ -643,24 +658,25 @@ class LunarRoverMeshEnv(ParallelEnv):
         if self.render_mode is None: return
 
         n_agents = len(self.possible_agents)
-   
+        # We keep the column ratios but add a row for the dashboard
         width_ratios = [4, 4] + ([4] * n_agents) + [3.5]
         num_cols = len(width_ratios)
         fx = 5.0 * num_cols
-        fy = max(1.25 * self.height / 100.0 * 4.0, 10.0)
-        
+        fy = 15.0
+
         plt.close()
         fig = plt.figure(figsize=(fx, fy), dpi=65)
 
+        # Added a 5th row (index 4) specifically for the dashboard
         gs = fig.add_gridspec(
-            ncols=num_cols, nrows=4,
-            width_ratios=width_ratios, height_ratios=(2.5, 2.5, 2.5, 2.5),
-            hspace=0.5, wspace=0.6,
-            top=0.95, bottom=0.15, left=0.025, right=0.955,
+            ncols=num_cols, nrows=5,
+            width_ratios=width_ratios, height_ratios=(2, 2, 2, 2, 1.5),
+            hspace=0.6, wspace=0.6,
+            top=0.95, bottom=0.05, left=0.025, right=0.955,
         )
 
-        sim_ax = fig.add_subplot(gs[:, 0])
-        bs_map_ax = fig.add_subplot(gs[:, 1])
+        sim_ax = fig.add_subplot(gs[0:4, 0]) # Simulation spans top 4 rows
+        bs_map_ax = fig.add_subplot(gs[0:4, 1]) # BS Map spans top 4 rows
 
         self.render_simulation(sim_ax)
         
@@ -669,44 +685,40 @@ class LunarRoverMeshEnv(ParallelEnv):
             for aid in self.possible_agents if aid in self.agent_map
         }
 
-        # render bs map with all paths
-        self.render_radio_map(
-            bs_map_ax, 
-            self.bs_radio_map, 
-            "BS Coverage (Pathfinding Source)", 
-            agent_paths=all_agent_paths
-        )
+        self.render_radio_map(bs_map_ax, self.bs_radio_map, "BS Coverage", agent_paths=all_agent_paths)
 
-        # individual agent maps
+        # Agent Radio Maps span top 4 rows
         for i, agent_id in enumerate(self.possible_agents):
             col_idx = i + 2 
-            map_ax = fig.add_subplot(gs[:, col_idx])
+            map_ax = fig.add_subplot(gs[0:4, col_idx])
             if agent_id in self.agent_map:
                 agent = self.agent_map[agent_id]
                 if agent.energy > 0:
                     radio_map = self.radio_model.generate_map((agent.x, agent.y), '5.8')
-                    label_char = chr(ord('A') + i) 
-                    self.render_radio_map(map_ax, radio_map, f"Radio Map (Agent {label_char})")
+                    self.render_radio_map(map_ax, radio_map, f"Radio Map (Agent {chr(ord('A') + i)})")
                 else:
-                    map_ax.text(0.5, 0.5, "SIGNAL LOST\n(Dead)", ha='center', va='center')
+                    map_ax.text(0.5, 0.5, "SIGNAL LOST", ha='center', va='center', color='red')
                     map_ax.axis('off')
             else:
                 map_ax.axis('off')
 
-        # metrics 
-        dash_ax = fig.add_subplot(gs[0, -1]) 
-        conn_ax = fig.add_subplot(gs[1, -1]) 
-        rss_ax = fig.add_subplot(gs[2, -1])    
-        energy_ax = fig.add_subplot(gs[3, -1]) 
+        # Metrics remain in the last column, top 4 rows
+        conn_ax = fig.add_subplot(gs[0, -1]) 
+        rss_ax = fig.add_subplot(gs[1, -1])    
+        energy_ax = fig.add_subplot(gs[2, -1]) 
+        # (gs[3, -1] is currently empty, or you can add another metric here)
+
+        # Dashboard now gets the ENTIRE bottom row
+        dash_ax = fig.add_subplot(gs[4, :]) 
 
         self.render_dashboard(dash_ax)
         self.render_bs_connectivity(conn_ax) 
-        self.render_avg_rss(rss_ax)            
+        self.render_avg_rss(rss_ax)             
         self.render_avg_energy(energy_ax)
 
-        fig.align_ylabels((energy_ax, conn_ax))
         canvas = FigureCanvas(fig)
         canvas.draw()
+
         plt.close()
 
         if self.render_mode == "rgb_array":
@@ -761,7 +773,11 @@ class LunarRoverMeshEnv(ParallelEnv):
             
             # draw a small arrowhead or marker to show direction
             ax.annotate("", xy=(v.x, v.y), xytext=(u.x, u.y),
-                        arrowprops=dict(arrowstyle="->", color=color, lw=2))
+            arrowprops=dict(
+                arrowstyle="->, head_width=0.8, head_length=1.0", 
+                color=color, 
+                lw=2
+            ))
 
         ax.axis('off')
         ax.set_xlim([0, self.width])
@@ -770,10 +786,16 @@ class LunarRoverMeshEnv(ParallelEnv):
 
     def render_dashboard(self, ax):
         ax.axis('off')
-        ax.set_title(f"DTN Network State | Time: {self.sim_time:.0f}", fontweight='bold')
+        
+        bs_total = self.base_station.num_packets_received
+        bs_unique = len(self.base_station.packets_received)
+        
+       
+        ax.set_title(f"DTN Network State | Time: {self.sim_time:.0f} | Total BS Recv: {bs_unique} ({bs_total} raw)", 
+                     fontweight='bold', fontsize=12, pad=20)
 
-        rows = [f"Agent {chr(ord('A') + i)}" for i in range(len(self.possible_agents))]
-        cols = ["Buffer %", "Pkts Sent", "Energy", "Dist (m)"]
+        rows = [f"{chr(ord('A') + i)}" for i in range(len(self.possible_agents))]
+        cols = ["Buf%", "Stored", "Gen", "Energy", "Dist (m)"]
         cell_text = []
 
         for agent_id in self.possible_agents:
@@ -783,17 +805,38 @@ class LunarRoverMeshEnv(ParallelEnv):
                 buf_per = (dtn["payload_size"] / dtn["buffer_size"]) * 100
                 cell_text.append([
                     f"{buf_per:.1f}%",
-                    f"{dtn['num_packets_generated']}",
+                    f"{dtn.get('num_packets', 0)}",
+                    f"{dtn.get('num_packets_generated', 0)}",
                     f"{agent.energy:.0f}",
                     f"{agent.total_distance:.1f}"
                 ])
             else:
-                cell_text.append(["N/A", "N/A", "Dead", "N/A"])
+                cell_text.append(["N/A", "N/A", "N/A", "Dead", "N/A"])
 
-        table = ax.table(cellText=cell_text, rowLabels=rows, colLabels=cols, 
-                         loc="upper center", bbox=[0.0, -0.2, 1.0, 1.2])
+        table = ax.table(
+            cellText=cell_text, 
+            rowLabels=rows, 
+            colLabels=cols, 
+            loc="center", 
+            bbox=[0.15, 0.2, 0.8, 0.7] 
+        )
+        
+        table.auto_set_font_size(False)
         table.set_fontsize(10)
         
+        # summary
+        bs_state = self.base_station.get_state()
+        bs_text = (f"BASE STATION SUMMARY: {bs_state['num_packets_received']} Total Received | "
+                   f"{bs_state['num_duplicates_received']} Duplicates")
+     
+        ax.text(0.5, -0.1, bs_text, transform=ax.transAxes, 
+                ha='center', va='top', fontsize=11, fontweight='bold',
+                bbox=dict(facecolor='cyan', alpha=0.2, edgecolor='black', boxstyle='round,pad=0.5'),
+                clip_on=False)
+
+        for (row, col), cell in table.get_celld().items():
+            if row == 0 or col == -1:
+                cell.get_text().set_weight('bold')
         
     def _render_human(self, canvas, fig):
 
