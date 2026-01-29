@@ -12,10 +12,16 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import pygame
 from collections import defaultdict
+import random
 
 from .marl_entities import MarlMeshDTNAgent as MeshAgent, BaseStation
 from .radio_model_nn import RadioMapModelNN
 from .pathfinding import a_star_search_rm as a_star_search
+
+def set_seed(seed=42):
+    """Sets all possible seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
 
 class LunarRoverMeshEnv(ParallelEnv):
     metadata = {
@@ -29,18 +35,22 @@ class LunarRoverMeshEnv(ParallelEnv):
                  radio_model: RadioMapModelNN = None,
                  num_agents=3,
                  radio_bias=0.0,
-                 render_mode=None):
+                 render_mode=None,
+                 num_goals = 5,
+                 seed=206):
         
         self.render_mode = render_mode
         self.hm_path = hm_path
         self.radio_model = radio_model
         self.radio_bias = radio_bias
-        
+        self.num_goals = num_goals
+        self.seed = seed
+        set_seed(self.seed)
         # Physics constants
         self.width = 256.0 
         self.height = 256.0
         
-        # this was pulled from the cadre 
+        # this was pulled from the viper 
         self.ROVER_SPEED = 0.2
         # 
         self.STEP_LENGTH = 20
@@ -119,6 +129,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.custom_links = {} 
         self.all_visible_links = []
         self.sim_time = 0
+        self.agent_goals_completed = {aid: 0 for aid in self.possible_agents}
+        self.mission_done = {aid: False for aid in self.possible_agents}
         self.history = {"datarate": [], "energy": [], "bs_link_ratio": [], "avg_rss": []}
         self.agent_rss_history = {aid: [] for aid in self.possible_agents}
         self.total_energy_consumed_step = 0.0
@@ -136,6 +148,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.all_visible_links = []
         self.history = {"datarate": [], "energy": [], "bs_link_ratio": [], "avg_rss": []}
         self.agent_rss_history = {aid: [] for aid in self.possible_agents}
+        self.agent_goals_completed = {aid: 0 for aid in self.possible_agents}
+        self.mission_done = {aid: False for aid in self.possible_agents}
         
         # randomly place bs
         new_bs_x, new_bs_y = np.random.uniform(0, self.width, size=(2,))
@@ -271,6 +285,11 @@ class LunarRoverMeshEnv(ParallelEnv):
             truncations[agent_id] = global_truncate
             infos[agent_id].update({"energy": agent.energy, "pos": (agent.x, agent.y)})
 
+        infos[agent_id].update({
+            "mission_completed": self.mission_done[agent_id],
+            "goals_reached": self.agent_goals_completed[agent_id]
+        })
+        
         observations = {a: self._get_obs(a) for a in active_this_step}
         
         # Filter dead agents from the loop
@@ -289,7 +308,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent.drop_expired_packets()
     
             # random packet generation
-            if np.random.rand() < self.PACKET_GEN_PROB:
+            if np.random.rand() < self.PACKET_GEN_PROB and not self.mission_done.get(agent_id, False):
                 agent.generate_packet(size=10, time_to_live=50, destination="BS_0")
 
             comm_flags = action[1:]
@@ -327,6 +346,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         for agent_id, action in actions.items():
             agent = self.agent_map[agent_id]
             
+            
             if agent.nav_path and len(agent.nav_path) > 1:
                 search_window = agent.nav_path[:15] 
                 dists = [np.sqrt((n[0]-agent.x)**2 + (n[1]-agent.y)**2) for n in search_window]
@@ -336,8 +356,11 @@ class LunarRoverMeshEnv(ParallelEnv):
 
             prev_dist = np.sqrt((agent.goal_x - agent.x)**2 + (agent.goal_y - agent.y)**2)
             
-            move_cmd = action[0] 
-            
+            if self.mission_done.get(agent_id, False):
+                move_cmd = 0 
+            else:
+                move_cmd = action[0]
+                
             
             dx, dy = 0, 0
             
@@ -385,25 +408,32 @@ class LunarRoverMeshEnv(ParallelEnv):
             safety_factor = 0.5
             per_pixel_threshold = (self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)) * safety_factor
 
-            if curr_dist < (self.MAX_DIST_PER_STEP*1.5): 
+
+            if curr_dist < (self.MAX_DIST_PER_STEP*1.5) and not self.mission_done[agent_id]: 
                 rewards[agent_id] += self.REWARD_GOAL_ARRIVAL
                 infos[agent_id]['task_complete'] = True
+                self.agent_goals_completed[agent_id] += 1
                 
-                max_retries = 100
-                for _ in range(max_retries):
-                    gx = np.random.uniform(0, self.width)
-                    gy = np.random.uniform(0, self.height)
-                    dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
-                    
-                    if dist > 25.0:
-                        start_node = (int(agent.x), int(agent.y))
-                        end_node = (int(gx), int(gy))
-                        path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold, self.radio_bias)
-                        if path:
-                            agent.goal_x = gx
-                            agent.goal_y = gy
-                            agent.nav_path = path
-                            break
+                if self.agent_goals_completed[agent_id] >= self.num_goals:
+                    self.mission_done[agent_id] = True
+                    agent.nav_path = [] 
+                    agent.goal_x, agent.goal_y = agent.x, agent.y 
+                else:
+                    max_retries = 100
+                    for _ in range(max_retries):
+                        gx = np.random.uniform(0, self.width)
+                        gy = np.random.uniform(0, self.height)
+                        dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
+                        
+                        if dist > 25.0:
+                            start_node = (int(agent.x), int(agent.y))
+                            end_node = (int(gx), int(gy))
+                            path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold, self.radio_bias)
+                            if path:
+                                agent.goal_x = gx
+                                agent.goal_y = gy
+                                agent.nav_path = path
+                                break
             else:
                 infos[agent_id]['task_complete'] = False
                 
@@ -416,6 +446,9 @@ class LunarRoverMeshEnv(ParallelEnv):
         picks movement action based on pure pursuit to follow the precomputed path
         """
         agent = self.agent_map[agent_id]
+        
+        if self.mission_done.get(agent_id, False):
+            return 0
         
         if not agent.nav_path:
             return 0 
@@ -630,7 +663,10 @@ class LunarRoverMeshEnv(ParallelEnv):
         plt.close()
         fig = plt.figure(figsize=(fx, fy), dpi=65)
 
-        # Added a 5th row (index 4) specifically for the dashboard
+        fig.suptitle(f"Radio Bias: {self.radio_bias} | Seed: {self.seed}", 
+                 fontsize=20, fontweight='bold', y=0.98)
+        
+
         gs = fig.add_gridspec(
             ncols=num_cols, nrows=5,
             width_ratios=width_ratios, height_ratios=(2, 2, 2, 2, 1.5),
@@ -758,7 +794,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                      fontweight='bold', fontsize=12, pad=20)
 
         rows = [f"{chr(ord('A') + i)}" for i in range(len(self.possible_agents))]
-        cols = ["Buf%", "Stored", "Gen", "Energy", "Dist (m)"]
+        cols = ["Buf%", "Stored", "Gen", "Goals", "Energy", "Dist (m)"]
         cell_text = []
 
         for agent_id in self.possible_agents:
@@ -766,10 +802,12 @@ class LunarRoverMeshEnv(ParallelEnv):
                 agent = self.agent_map[agent_id]
                 dtn = agent.payload_manager.get_state()
                 buf_per = (dtn["payload_size"] / dtn["buffer_size"]) * 100
+                goals_done = self.agent_goals_completed.get(agent_id, 0)
                 cell_text.append([
                     f"{buf_per:.1f}%",
                     f"{dtn.get('num_packets', 0)}",
                     f"{dtn.get('num_packets_generated', 0)}",
+                    f"{goals_done}/{self.num_goals}",
                     f"{agent.energy:.0f}",
                     f"{agent.total_distance:.1f}"
                 ])
@@ -910,63 +948,3 @@ class LunarRoverMeshEnv(ParallelEnv):
         ax.grid(True, alpha=0.3)
 
         
-
-    # DEPRECATED RADIO CACHE METHODS 
-    # ################################# 
-    #  def _update_radio_cache_batch(self):
-    #     """
-    #     Updates the radio maps for all active agents in a single batch.
-    #     Checks cache first to avoid re-generating maps for stationary agents.
-    #     """
-    #     if not self.radio_model:
-    #         return
-
-    #     needed_indices = []
-    #     needed_positions = []
-    #     needed_ids = []
-
-    #     # find which agents need new maps
-    #     for agent_id in self.agents:
-    #         agent = self.agent_map[agent_id]
-            
-    #         key = (int(agent.x), int(agent.y), '5.8') 
-            
-    #         if key not in self.radio_cache:
-    #             needed_ids.append(agent_id)
-    #             needed_positions.append((agent.x, agent.y))
-
-    #     # batch inference
-    #     if len(needed_positions) > 0:
-    #         new_maps = self.radio_model.generate_map_batch(needed_positions, '5.8')
-            
-    #         # update cache
-    #         for i, agent_id in enumerate(needed_ids):
-    #             agent = self.agent_map[agent_id]
-    #             key = (int(agent.x), int(agent.y), '5.8')
-    #             self.radio_cache[key] = new_maps[i]
-
-    # def _get_cached_radio_map(self, agent):
-    #     """Retrieves map from cache. Assumes _update_radio_cache_batch was called."""
-    #     grid_pos = (int(agent.x), int(agent.y), '5.8')
-    #     return self.radio_cache.get(grid_pos, None)
-
-
-    # def _get_radio_map(self, agent):
-    #     """Cached Neural Network Inference"""
-    #     grid_pos = (int(agent.x), int(agent.y), '5.8') 
-        
-    #     if grid_pos not in self.radio_cache:
-    #         if self.radio_model:
-    #             self.radio_cache[grid_pos] = self.radio_model.generate_map((agent.x, agent.y), '5.8')
-    #         else:
-    #             return None
-    #     return self.radio_cache[grid_pos]
-
-    # def _get_signal_strength(self, radio_map, target_agent):
-    #     """Gets the signal strength (dBm) from a given radio_map at target's location."""
-    #     if radio_map is None: return -150.0
-    #     r_idx = int((target_agent.y / self.height) * (radio_map.shape[0]-1))
-    #     c_idx = int((target_agent.x / self.width) * (radio_map.shape[1]-1))
-    #     r_idx = np.clip(r_idx, 0, radio_map.shape[0]-1)
-    #     c_idx = np.clip(c_idx, 0, radio_map.shape[1]-1)
-    #     return radio_map[r_idx, c_idx]
