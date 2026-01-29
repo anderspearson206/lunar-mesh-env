@@ -66,7 +66,7 @@ def get_combined_heuristic_action(agent_id, env):
 
 def main():
     
-    SEED = 2002
+    SEED = 1885
     set_seed(SEED)
     
     DATA_ROOT = '../../NASA_DCGR_NETWORKING/radio_data_2/radio_data_2'
@@ -111,7 +111,8 @@ def main():
         hm_path=HM_PATH,
         radio_model=radio_model,
         num_agents=3, 
-        render_mode="human" 
+        render_mode="human", 
+        radio_bias=1.0
     )
     
     obs, info = env.reset()
@@ -121,7 +122,7 @@ def main():
     print(f"Agents: {env.possible_agents}")
     print("Goal: Rovers will navigate to randomly assigned tasks (task marked as X).")
     
-    SIM_STEPS = 300
+    SIM_STEPS = 200
     
     for step in range(SIM_STEPS):
         
