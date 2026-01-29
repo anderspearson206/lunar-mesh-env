@@ -126,7 +126,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         # Pygame
         self.window = None
         self.clock = None
-
+        
+    
     def reset(self, seed=None, options=None):
         self.agents = self.possible_agents[:]
         self.sim_time = 0
@@ -145,6 +146,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             
         safety_factor = 0.5
         per_pixel_threshold = (self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)) * safety_factor
+        
         # reset agent states
         for agent_id in self.agents:
             agent = self.agent_map[agent_id]
@@ -153,36 +155,19 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent.active_route = None
             agent.current_datarate = 0.0
             
-            agent.x = np.random.uniform(0, self.width)
-            agent.y = np.random.uniform(0, self.height)
-            
-            # generate task, right now it's set to be far
-            # away from initial pos
             max_retries = 100
             for _ in range(max_retries):
-
-                # agent start
                 agent.x = np.random.uniform(0, self.width)
                 agent.y = np.random.uniform(0, self.height)
                 
-                # goal
                 gx = np.random.uniform(0, self.width)
                 gy = np.random.uniform(0, self.height)
-                
                 dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
                 
                 if dist > 50.0:
-                    # make sure there is valid path to goal
                     start_node = (int(agent.x), int(agent.y))
                     end_node = (int(gx), int(gy))
-                    
-                    path = a_star_search(self.heightmap, 
-                                         self.bs_radio_map, 
-                                         start_node, 
-                                         end_node, 
-                                         per_pixel_threshold, 
-                                         self.radio_bias)
-                    
+                    path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold, self.radio_bias)
                     if path:
                         agent.goal_x = gx
                         agent.goal_y = gy
@@ -191,6 +176,12 @@ class LunarRoverMeshEnv(ParallelEnv):
                     
         # initial radio cache update
         self.radio_model.generate_map_batch([(self.agent_map[a].x, self.agent_map[a].y) for a in self.agents], '5.8')
+
+        # get connection list
+        for agent_id in self.agents:
+            agent = self.agent_map[agent_id]
+            agent.update_neighbors(list(self.agent_map.values()), self.width, self.height)
+            agent.update_bs_connection(self.radio_model, self.width, self.height)
 
         observations = {a: self._get_obs(a) for a in self.agents}
         infos = {a: {} for a in self.agents}
@@ -204,23 +195,30 @@ class LunarRoverMeshEnv(ParallelEnv):
         infos = {a: {} for a in self.agents}
         
         self.total_energy_consumed_step = 0.0
+        self.sim_time += 1
         
-        # handle movement logic 
+        # Reset viz and metrics for this step
+        self.all_visible_links = [] 
+        self.custom_links = {}     
+        for agent in self.agent_map.values():
+            agent.current_datarate = 0.0  
+
+        
+        self._handle_communication_step(actions, rewards, infos)
+        
         self._handle_movement_step(actions, rewards, infos)
 
-        # global radio update to leverage batch processing
+        # after movement and comms actions have been done, update
+        # comms info
+        
+        # global rm update to leverage batch processing
         agent_positions = [(a.x, a.y) for a in self.agent_map.values()]
         self.radio_model.generate_map_batch(agent_positions, '5.8')
-
-        # these are for rendering and visualization
-        # reset each step
-        self.all_visible_links = [] 
-        self.custom_links = {}      
 
         for agent_id, agent in self.agent_map.items():
             if agent.energy <= 0: continue
             
-            # update whether each agent is connected to others & BS
+            # Update connectivity for the new positions
             agent.update_neighbors(list(self.agent_map.values()), self.width, self.height)
             agent.update_bs_connection(self.radio_model, self.width, self.height)
 
@@ -228,17 +226,68 @@ class LunarRoverMeshEnv(ParallelEnv):
             if agent.bs_connected:
                 self.all_visible_links.append((agent, self.base_station))
             
-            # add peer links
             for neighbor in agent.neighbors:
                 if agent.ue_id < neighbor.ue_id:
                     self.all_visible_links.append((agent, neighbor))
 
-        # DTN action
+        
+        # metrics and cleanup
+        global_truncate = self.sim_time >= self.EP_MAX_TIME
+
+        active_datarates = [self.agent_map[a].current_datarate for a in self.agents if not terminations[a]]
+        avg_datarate = np.mean(active_datarates) if active_datarates else 0.0
+        self.history['datarate'].append(avg_datarate)
+        self.history['energy'].append(self.total_energy_consumed_step)
+        
+        # calculate BS link ratio
+        total_possible_links = len(self.agents)
+        if total_possible_links > 0:
+            bs_links = sum(1 for a_id in self.agents if self.base_station in self.connections[self.agent_map[a_id]])
+            link_ratio = bs_links / total_possible_links
+        else:
+            link_ratio = 0.0
+        self.history['bs_link_ratio'].append(link_ratio)
+        
+        # calculate RSS stats
+        current_step_rss = []
+        for aid in self.possible_agents:
+            agent = self.agent_map[aid]
+            if agent.energy > 0:
+                rssi_from_bs = self.radio_model.get_signal_strength(*self.base_station.get_position(), agent.x, agent.y)
+                self.agent_rss_history[aid].append(rssi_from_bs)
+                current_step_rss.append(rssi_from_bs)
+            
+        if current_step_rss:
+            self.history["avg_rss"].append(np.mean(current_step_rss))
+        else:
+            self.history["avg_rss"].append(-150.0)
+            
+        # final termination checks
+        active_this_step = list(actions.keys())
+        for agent_id in active_this_step:
+            agent = self.agent_map[agent_id]
+            if agent.energy <= 0:
+                terminations[agent_id] = True
+            truncations[agent_id] = global_truncate
+            infos[agent_id].update({"energy": agent.energy, "pos": (agent.x, agent.y)})
+
+        observations = {a: self._get_obs(a) for a in active_this_step}
+        
+        # Filter dead agents from the loop
+        self.agents = [a for a in self.agents if not terminations.get(a, False) and not truncations.get(a, False)]
+        
+        return observations, rewards, terminations, truncations, infos
+
+
+
+    def _handle_communication_step(self, actions, rewards, infos):
+        # comm step
         for agent_id, action in actions.items():
             agent = self.agent_map[agent_id]
             if agent.energy <= 0: continue
             
             agent.drop_expired_packets()
+    
             # random packet generation
             if np.random.rand() < self.PACKET_GEN_PROB:
                 agent.generate_packet(size=10, time_to_live=50, destination="BS_0")
@@ -246,7 +295,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             comm_flags = action[1:]
             targets_to_send = []
 
-            # determine who the agent is sending to this step
+            # Determine targets using current neighbors
             for i, flag in enumerate(comm_flags[:-1]):
                 if flag == 1:
                     target = self.agent_map[self.possible_agents[i]]
@@ -259,112 +308,43 @@ class LunarRoverMeshEnv(ParallelEnv):
                 targets_to_send.append(self.base_station)
                 self.custom_links[(agent, self.base_station)] = 'cyan'
 
-            # send packets and get rewards
+            # send packets
             if targets_to_send:
                 pre_delivery = self.base_station.num_packets_received
                 agent.send_packet(targets_to_send)
                 delivered_now = self.base_station.num_packets_received - pre_delivery
                 rewards[agent_id] += delivered_now * self.REWARD_PACKET_DELIVERY
                 
-                # Apply transmission energy cost
-                # this is still a placeholder
                 tx_cost = self.COST_TX_5G_PER_STEP * len(targets_to_send)
                 agent.energy -= tx_cost
                 self.total_energy_consumed_step += tx_cost
-
-        # metrics for visualizations 
-        self.sim_time += 1
-
-      
-        global_truncate = self.sim_time >= self.EP_MAX_TIME
-
-        active_datarates = [self.agent_map[a].current_datarate for a in self.agents if not terminations[a]]
-        avg_datarate = np.mean(active_datarates) if active_datarates else 0.0
-        self.history['datarate'].append(avg_datarate)
-        self.history['energy'].append(self.total_energy_consumed_step)
-        
-        for agent_id in self.agents:
-            agent = self.agent_map[agent_id]
-            if agent.energy <= 0:
-                terminations[agent_id] = True
-            truncations[agent_id] = global_truncate
-            infos[agent_id] = {"energy": agent.energy, "pos": (agent.x, agent.y)}
-
-        active_this_step = list(actions.keys())
-        
-        total_possible_links = len(self.agents)
-        if total_possible_links > 0:
-            bs_links = sum(1 for a_id in self.agents if self.base_station in self.connections[self.agent_map[a_id]])
-            link_ratio = bs_links / total_possible_links
-        else:
-            link_ratio = 0.0
-
-        self.history['bs_link_ratio'].append(link_ratio)
-        
-        current_step_rss = []
-        for aid in self.possible_agents:
-            agent = self.agent_map[aid]
-            if agent.energy > 0:
-                rssi_from_bs = self.radio_model.get_signal_strength(*self.base_station.get_position(), agent.x, agent.y)
                 
-                self.agent_rss_history[aid].append(rssi_from_bs)
-                current_step_rss.append(rssi_from_bs)
-            
-        if current_step_rss:
-            self.history["avg_rss"].append(np.mean(current_step_rss))
-        else:
-            self.history["avg_rss"].append(-150.0)
-            
-            
-        global_truncate = self.sim_time >= self.EP_MAX_TIME
-        for agent_id in active_this_step:
-            agent = self.agent_map[agent_id]
-            if agent.energy <= 0:
-                terminations[agent_id] = True
-            truncations[agent_id] = global_truncate
-            infos[agent_id] = {"energy": agent.energy, "pos": (agent.x, agent.y)}
+        return actions, rewards, infos
 
-        observations = {a: self._get_obs(a) for a in active_this_step}
-        
-        self.agents = [a for a in self.agents if not terminations.get(a, False) and not truncations.get(a, False)]
-        
-        return observations, rewards, terminations, truncations, infos
-
-    # _handle_communication_step(self, actions, rewards, infos):
-        
 
 
     def _handle_movement_step(self, actions, rewards, infos):
         for agent_id, action in actions.items():
             agent = self.agent_map[agent_id]
             
-            # follow path to objective
             if agent.nav_path and len(agent.nav_path) > 1:
-                # only look at the next 15 nodes to find closest
                 search_window = agent.nav_path[:15] 
-
                 dists = [np.sqrt((n[0]-agent.x)**2 + (n[1]-agent.y)**2) for n in search_window]
-                
                 closest_idx = np.argmin(dists)
-                
-                # remove passed nodes
                 if closest_idx > 0:
                     agent.nav_path = agent.nav_path[closest_idx:]
 
             prev_dist = np.sqrt((agent.goal_x - agent.x)**2 + (agent.goal_y - agent.y)**2)
             
             move_cmd = action[0] 
-            agent.current_datarate = 0.0 
+            
             
             dx, dy = 0, 0
             
-            # cardinal directions
             if move_cmd == 1: dy = 1        # North
             elif move_cmd == 2: dy = -1     # South
             elif move_cmd == 3: dx = -1     # West
             elif move_cmd == 4: dx = 1      # East
-            
-            # diagonals
             elif move_cmd == 5: dx, dy = 0.707, 0.707   # NE
             elif move_cmd == 6: dx, dy = -0.707, 0.707  # NW
             elif move_cmd == 7: dx, dy = 0.707, -0.707  # SE
@@ -384,12 +364,9 @@ class LunarRoverMeshEnv(ParallelEnv):
                 height_diff = target_z - current_z
                 
                 if height_diff > self.MAX_INCLINE_PER_STEP:
-                    # blocked
-                    # print("blocked action")
                     rewards[agent_id] += self.PENALTY_INVALID_MOVE
                     step_energy = self.COST_IDLE_PER_STEP 
                 else:
-                    #  allowed
                     agent.x, agent.y = new_x, new_y
                     agent.total_distance += self.MAX_DIST_PER_STEP
                     incline_cost = max(0, height_diff * 0.5) 
@@ -400,26 +377,18 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent.energy -= step_energy
             self.total_energy_consumed_step += step_energy
 
+            # rewards and arrival logic
             curr_dist = np.sqrt((agent.goal_x - agent.x)**2 + (agent.goal_y - agent.y)**2)
-            
-            # dense reward for getting closer
-            # reward function has not been tuned extensively
-            # so this could be changed later
             dist_delta = prev_dist - curr_dist 
             rewards[agent_id] += dist_delta * self.REWARD_DIST_SCALE
+            
             safety_factor = 0.5
             per_pixel_threshold = (self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)) * safety_factor
-            # arrival logic
-            # print(agent)
-            # print(curr_dist)
-            # print(self.MAX_DIST_PER_STEP*4.0)
-                
+
             if curr_dist < (self.MAX_DIST_PER_STEP*1.5): 
                 rewards[agent_id] += self.REWARD_GOAL_ARRIVAL
                 infos[agent_id]['task_complete'] = True
-                print(f"Agent {agent_id} completed its task!")
                 
-                # respawn
                 max_retries = 100
                 for _ in range(max_retries):
                     gx = np.random.uniform(0, self.width)
@@ -429,13 +398,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                     if dist > 25.0:
                         start_node = (int(agent.x), int(agent.y))
                         end_node = (int(gx), int(gy))
-                        path = a_star_search(self.heightmap, 
-                                             self.bs_radio_map, 
-                                             start_node, 
-                                             end_node, 
-                                             per_pixel_threshold, 
-                                             self.radio_bias)
-                        
+                        path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold, self.radio_bias)
                         if path:
                             agent.goal_x = gx
                             agent.goal_y = gy
@@ -443,8 +406,8 @@ class LunarRoverMeshEnv(ParallelEnv):
                             break
             else:
                 infos[agent_id]['task_complete'] = False
-            
-        return actions, rewards, infos    
+                
+        return actions, rewards, infos
             
                 
             
