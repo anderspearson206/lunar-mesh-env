@@ -158,8 +158,10 @@ class LunarRoverMeshEnv(ParallelEnv):
 
         self.bs_radio_map = self.radio_model.generate_map((self.base_station.x, self.base_station.y), '5.8')
             
-        safety_factor = 0.5
+        safety_factor = 0.9
         per_pixel_threshold = (self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)) * safety_factor
+        
+        rng = np.random.RandomState(self.seed)
         
         # reset agent states
         for agent_id in self.agents:
@@ -170,22 +172,23 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent.current_datarate = 0.0
             
             max_retries = 100
-            for _ in range(max_retries):
-                agent.x = np.random.uniform(0, self.width)
-                agent.y = np.random.uniform(0, self.height)
+            for i in range(max_retries):
+                candidate_x = rng.uniform(0, self.width)
+                candidate_y = rng.uniform(0, self.height)
                 
-                gx = np.random.uniform(0, self.width)
-                gy = np.random.uniform(0, self.height)
+                gx = rng.uniform(0, self.width)
+                gy = rng.uniform(0, self.height)
                 dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
                 
                 if dist > 50.0:
-                    start_node = (int(agent.x), int(agent.y))
+                    start_node = (int(candidate_x), int(candidate_y))
                     end_node = (int(gx), int(gy))
                     path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold, self.radio_bias)
                     if path:
-                        agent.goal_x = gx
-                        agent.goal_y = gy
+                        agent.x, agent.y = candidate_x, candidate_y
+                        agent.goal_x, agent.goal_y = gx, gy
                         agent.nav_path = path 
+                        # print(i)
                         break
                     
         # initial radio cache update
@@ -420,9 +423,10 @@ class LunarRoverMeshEnv(ParallelEnv):
                     agent.goal_x, agent.goal_y = agent.x, agent.y 
                 else:
                     max_retries = 100
-                    for _ in range(max_retries):
-                        gx = np.random.uniform(0, self.width)
-                        gy = np.random.uniform(0, self.height)
+                    rng = np.random.RandomState(self.seed + self.agent_goals_completed[agent_id]+int(agent_id[-1]))
+                    for i in range(max_retries):
+                        gx = rng.uniform(0, self.width)
+                        gy = rng.uniform(0, self.height)
                         dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
                         
                         if dist > 25.0:
@@ -433,6 +437,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                                 agent.goal_x = gx
                                 agent.goal_y = gy
                                 agent.nav_path = path
+                                # print(i)
                                 break
             else:
                 infos[agent_id]['task_complete'] = False
@@ -789,8 +794,11 @@ class LunarRoverMeshEnv(ParallelEnv):
         bs_total = self.base_station.num_packets_received
         bs_unique = len(self.base_station.packets_received)
         
-       
-        ax.set_title(f"DTN Network State | Time: {self.sim_time:.0f} | Total BS Recv: {bs_unique} ({bs_total} raw)", 
+        packets_generated = sum(
+            self.agent_map[aid].payload_manager.get_state().get('num_packets_generated', 0)
+            for aid in self.possible_agents if aid in self.agent_map
+        )
+        ax.set_title(f"DTN Network State | Time: {self.sim_time:.0f} | Total BS Recv: {bs_unique} ({bs_total} raw), Packets Generated: {packets_generated}", 
                      fontweight='bold', fontsize=12, pad=20)
 
         rows = [f"{chr(ord('A') + i)}" for i in range(len(self.possible_agents))]
