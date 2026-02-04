@@ -143,7 +143,53 @@ class RadioMapModelNN:
 
     def clear_cache(self):
         self.cache = {}
+    
+    def get_throughput(rss, frequency_band='5.8'):
+        """
+        Returns throughput in Mbps based on RSS (dBm).
+        Data rate R_data = N_data_bits_per_symbol / T_symbol
         
+        N_data_bits_per_symbol = N_data_subcarriers * N_bits_per_sub_carrier * R_coding_rate
+        
+        Sources:
+        - 5.8 GHz: https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=9363693 PAGE ~2829
+        - 415 MHz: placeholder implementation
+        """
+
+        if frequency_band == '5.8':
+            # From table 17 5, N_data_subcarriers is 48
+            N_dsc = 48.0
+            
+            # T symbol for 20MHz spacing defined in table 17 16
+            T_symbol = 4e-6
+            
+            # N_bit_per_subcarrier is determined by modulation
+            # BPSK=1, QPSK=2, 16-QAM=4, 64-QAM=8 used
+            N_bpsc = {"BPSK":1.0, "QPSK":2.0, "16-QAM":4.0, "64-QAM":8.0}
+            
+            # coding rate, modulation, and minimum sensitivity for 20MHz channel spacing
+            # defined in table 17-18
+            R_cr = [1.0/2.0, 3.0/4.0, 2.0/3.0]
+            
+            # can be found in  table 17-18
+            if rss >= -65: return N_dsc*N_bpsc['64-QAM']*R_cr[1]/T_symbol  # 64-QAM 3/4, 54Mbps
+            if rss >= -66: return N_dsc*N_bpsc['64-QAM']*R_cr[2]/T_symbol  # 64-QAM 2/3, 48Mbps
+            if rss >= -70: return N_dsc*N_bpsc['16-QAM']*R_cr[1]/T_symbol  # 16-QAM 3/4, 36Mbps
+            if rss >= -74: return N_dsc*N_bpsc['16-QAM']*R_cr[0]/T_symbol  # 16-QAM 1/2, 24Mbps
+            if rss >= -77: return N_dsc*N_bpsc['QPSK']*R_cr[1]/T_symbol   # QPSK 3/4, 18Mbps
+            if rss >= -79: return N_dsc*N_bpsc['QPSK']*R_cr[0]/T_symbol   # QPSK 1/2, 12Mbps
+            if rss >= -81: return N_dsc*N_bpsc['BPSK']*R_cr[1]/T_symbol   # BPSK 3/4, 9Mbps
+            if rss >= -82: return N_dsc*N_bpsc['BPSK']*R_cr[0]/T_symbol   # BPSK 1/2, 6Mbps
+            return 0.0                  # Disconnected
+
+        elif frequency_band == '415':
+            if rss >= -85: return 2.0   
+            if rss >= -90: return 1.0   
+            if rss >= -95: return 0.5   
+            if rss >= -105: return 0.1  
+            return 0.0
+
+        return 0.0
     
     def _denormalize(self, tensor):
         """Converts a tensor from the [-1, 1] range back to the [0, 1] range."""
