@@ -112,19 +112,19 @@ class RadioMapModelNN:
         """Standardizes the key for the internal dictionary."""
         return (int(x), int(y), str(frequency))
 
-    def get_signal_strength(self, ox:float, oy: float, tx: float, ty: float, freq: str = '5.8') -> float:
+    def get_signal_strength(self, origin_x:float, origin_y: float, target_x: float, target_y: float, freq: str = '5.8') -> float:
         """
         Calculates signal strength at (tx, ty) from a provided radio_map at pos
         (ox, oy).
         """
-        radio_map = self.generate_map((ox, oy), freq)
+        radio_map = self.generate_map((origin_x, origin_y), freq)
         
         if radio_map is None: 
             return -150.0
             
         # map world coords to pixel indices
-        r_idx = int((ty / self.height) * (radio_map.shape[0] - 1))
-        c_idx = int((tx / self.width) * (radio_map.shape[1] - 1))
+        r_idx = int((target_y / self.height) * (radio_map.shape[0] - 1))
+        c_idx = int((target_x / self.width) * (radio_map.shape[1] - 1))
         
         r_idx = np.clip(r_idx, 0, radio_map.shape[0] - 1)
         c_idx = np.clip(c_idx, 0, radio_map.shape[1] - 1)
@@ -143,8 +143,24 @@ class RadioMapModelNN:
 
     def clear_cache(self):
         self.cache = {}
+        
+    def get_throughput_pos(self, origin_x:float, origin_y:float, target_x:float, target_y:float, freq: str = '5.8') -> float:
+        """combines get_signal_strength and get_throughput to determine a throughput based on tx/rx position
+
+        Args:
+            origin_x (float): _description_
+            origin_y (float): _description_
+            target_x (float): _description_
+            target_y (float): _description_
+            freq (str, optional): _description_. Defaults to '5.8'.
+
+        Returns:
+            float: _description_
+        """
+        rss = self.get_signal_strength(origin_x, origin_y, target_x, target_y, freq)
+        return self.get_throughput_rss(rss, freq)
     
-    def get_throughput(rss, frequency_band='5.8'):
+    def get_throughput_rss(self, rss:float, frequency_band='5.8') -> float:
         """
         Returns throughput in Mbps based on RSS (dBm).
         Data rate R_data = N_data_bits_per_symbol / T_symbol
@@ -164,8 +180,8 @@ class RadioMapModelNN:
             T_symbol = 4e-6
             
             # N_bit_per_subcarrier is determined by modulation
-            # BPSK=1, QPSK=2, 16-QAM=4, 64-QAM=8 used
-            N_bpsc = {"BPSK":1.0, "QPSK":2.0, "16-QAM":4.0, "64-QAM":8.0}
+            # BPSK=1, QPSK=2, 16-QAM=4, 64-QAM=6 used
+            N_bpsc = {"BPSK":1.0, "QPSK":2.0, "16-QAM":4.0, "64-QAM":6.0}
             
             # coding rate, modulation, and minimum sensitivity for 20MHz channel spacing
             # defined in table 17-18

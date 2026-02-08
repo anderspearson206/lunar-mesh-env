@@ -2,6 +2,7 @@
 
 from collections import deque
 from time import time
+from typing import Set, Dict, List
 
 class Packet:
     counter = 0
@@ -31,8 +32,60 @@ class PayloadManager:
             self.payload_size -= packet.size
             for target in targets:
                 target.receive_packet(packet)
+    
+    def send_packets_rate_aware(self, target_agent, target_known_packets: Set[str], 
+                                data_rate_mbps: float, step_duration: float) -> int:
+        """
+        Iterates through buffer, sends what the target 
+        doesn't have, up to the bandwidth limit.
+        """
+        # calculate capacity in bits
+        # Mbps * 1e6 * seconds = bits allowed
+        limit_bits = data_rate_mbps * 1e6 * step_duration
+        
+        sent_count = 0
+        bits_sent = 0
+        packets_to_deliver = []
+
+        # iterate without popping
+        for packet in self.buffer:
+            if bits_sent >= limit_bits:
+                break
                 
-                
+            # check if target already has packet
+            if packet.packet_id in target_known_packets:
+                continue 
+
+            # check bw
+            if (bits_sent + packet.size) <= limit_bits:
+                packets_to_deliver.append(packet)
+                bits_sent += packet.size
+                sent_count += 1
+            else:
+                break 
+
+        # send / copy to target
+        for p in packets_to_deliver:
+            target_agent.receive_packet(p)
+            
+        return sent_count
+
+    def cleanup_acked_packets(self, global_acked_ids: Set[str]):
+        """
+        Removes packets from the buffer that are known to be at the BS.
+        """
+        new_buffer = deque()
+        new_payload_size = 0
+        
+        for packet in self.buffer:
+            if packet.packet_id in global_acked_ids:
+                continue 
+            else:
+                new_buffer.append(packet)
+                new_payload_size += packet.size
+        
+        self.buffer = new_buffer
+        self.payload_size = new_payload_size
                 
     # we may not need this and can instead just call send packet to self
     def send_and_duplicate_packet(self, targets):
@@ -55,6 +108,11 @@ class PayloadManager:
                 break
     
     def receive_packet(self, packet:Packet):
+        # don't accept duplicates
+        for p in self.buffer:
+            if p.packet_id == packet.packet_id:
+                return
+        
         while packet.size + self.payload_size > self.buffer_size:
             old_packet = self.buffer.popleft()
             self.payload_size -= old_packet.size
@@ -80,3 +138,5 @@ class PayloadManager:
             "num_packets": len(self.buffer),
             "num_packets_generated": self.num_packets_generated
         }
+        
+    

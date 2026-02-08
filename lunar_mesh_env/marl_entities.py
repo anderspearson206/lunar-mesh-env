@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from .payload_manager import Packet, PayloadManager
 
 from .radio_model_nn import RadioMapModelNN
-
+from collections import defaultdict
 
 class BaseStation:
     """
@@ -100,6 +100,10 @@ class MarlMeshDTNAgent(MarlAgent):
         
         self.payload_manager = PayloadManager(self.id, buffer_size=buffer_size)
         
+        self.network_state = defaultdict(set)
+        # Initialize self state
+        self.network_state[self.id] = set()
+        
         self.nav_path: List[Tuple[int, int]] = []  # pathfinding state
         
 
@@ -114,9 +118,59 @@ class MarlMeshDTNAgent(MarlAgent):
     
     def receive_packet(self, packet: Packet):
         self.payload_manager.receive_packet(packet)
+        self.network_state[self.id].add(packet.packet_id)
+        
+    def merge_network_state(self, other_agent_state: Dict[str, set]):
+        """
+        Updates local knowledge of what packets exist in the network.
+        """
+        for agent_id, packet_set in other_agent_state.items():
+            self.network_state[agent_id].update(packet_set)
+            
 
     def send_packet(self, targets: List[MarlAgent|BaseStation]):
         self.payload_manager.send_packet(targets)
+        
+    def send_packets_to_target(self, target, step_duration):
+        """
+        for rate based sending 
+        """
+        target_id = target.id
+        data_rate = self.radio_model.get_throughput_pos(self.x, self.y, target.x, target.y)
+        
+        # get network state
+        target_known = self.network_state.get(target_id, set())
+        
+        # Send
+        sent_count = self.payload_manager.send_packets_rate_aware(
+            target, target_known, data_rate, step_duration
+        )
+        
+        return sent_count
+    
+    
+    def cleanup_buffer(self):
+        """
+        Removes packets that the BS has received.
+        """
+        if "BS_0" in self.network_state:
+            acked_ids = self.network_state["BS_0"]
+            self.payload_manager.cleanup_acked_packets(acked_ids)
+            
+    
+    def send_packets(self, targets: List[MarlAgent|BaseStation], step_duration: float):
+        """
+        Sends packets to multiple targets based on calculated throughput.
+        """
+        for target in targets:
+            # get throughput based on pos
+            rate = self.radio_model.get_throughput_pos(self.x, self.y, target.x, target.y, freq='5.8')
+            
+            # 3. Send payload
+            # Optional: If the medium is shared (TDMA), you might divide step_duration 
+            # by len(targets). For now, we assume parallel links (FDMA/CDMA).
+            if rate > 0:
+                self.payload_manager.send_packets(target, rate, step_duration)
 
     def generate_packet(self, size: int, time_to_live: float, destination: str):
         self.payload_manager.generate_packet(size, time_to_live, destination)
@@ -128,7 +182,7 @@ class MarlMeshDTNAgent(MarlAgent):
                         all_agents: List['MarlMeshAgent'], 
                         width: float, 
                         height: float, 
-                        dbm_thresh: float = -90.0, 
+                        dbm_thresh: float = -82, 
                         frequency: str = '5.8'
                        ) -> set['MarlMeshAgent']:
         """
@@ -153,7 +207,7 @@ class MarlMeshDTNAgent(MarlAgent):
                              radio_model,
                              width: float,
                              height: float,
-                             dbm_thresh: float = -90.0,
+                             dbm_thresh: float = -82.0,
                              frequency: str = '5.8'
                             ) -> bool:
         """
@@ -419,7 +473,7 @@ class MarlMeshAgent(MarlAgent):
         """
         LEGACY: Agent's hardcoded logic to find a route.
         """
-        HIGH_SPEED_THRESH_DBM = -90.0
+        HIGH_SPEED_THRESH_DBM = -82.0
         ROBUST_THRESH_DBM = -100.0 
 
         # try 5.8GHz

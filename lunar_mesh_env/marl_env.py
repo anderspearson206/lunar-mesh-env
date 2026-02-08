@@ -18,6 +18,12 @@ from .marl_entities import MarlMeshDTNAgent as MeshAgent, BaseStation
 from .radio_model_nn import RadioMapModelNN
 from .pathfinding import a_star_search_rm as a_star_search
 
+
+PACKET_SIZE_BITS = 100 * 1024 # 100 Kb per packet
+BURST_SIZE_MBITS = 10.0       # A "science event" generates 50 Mb of data
+TELEMETRY_RATE_MBPS = 0.5     # Constant 0.5 Mbps background stream
+BURST_PROBABILITY = 0.30
+
 def set_seed(seed=42):
     """Sets all possible seeds for reproducibility."""
     random.seed(seed)
@@ -37,6 +43,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                  radio_bias=0.0,
                  render_mode=None,
                  num_goals = 5,
+                 packet_mode = 'boolean',
                  seed=206):
         
         self.render_mode = render_mode
@@ -44,6 +51,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.radio_model = radio_model
         self.radio_bias = radio_bias
         self.num_goals = num_goals
+        self.packet_mode = packet_mode
         self.seed = seed
         set_seed(self.seed)
         # Physics constants
@@ -68,7 +76,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.COST_TX_415_PER_STEP = 2.0
         self.COST_IDLE_PER_STEP = 0.1
         self.EP_MAX_TIME = 300
-        
+        self.MIN_DBM_THRESHOLD = -82.0 # look at get_throughput_rss() in radio_model_nn.py
         # Reward Config
         self.REWARD_PEER_LINK = 1.0
         self.REWARD_BS_LINK = 5.0 
@@ -106,14 +114,15 @@ class LunarRoverMeshEnv(ParallelEnv):
         # petting zoo style 
         self.possible_agents = [f"rover_{i}" for i in range(num_agents)]
         self.agents = self.possible_agents[:]
-        
+        self.buffer_capacity_bits = 1000 * 1024 * 1024
         # bridges petting zoo agent_id to actual agent object
         self.agent_map = {}
         for i, agent_id in enumerate(self.agents):
             self.agent_map[agent_id] = MeshAgent(ue_id=i+1, 
                                                  heightmap=self.heightmap,
                                                  radio_model=self.radio_model, 
-                                                 bs=self.base_station)
+                                                 bs=self.base_station, 
+                                                 buffer_size=self.buffer_capacity_bits)
 
 
         self.observation_spaces = {
@@ -225,6 +234,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         return observations, infos
 
     def step(self, actions):
+        
         rewards = {a: 0 for a in self.agents}
         terminations = {a: False for a in self.agents}
         truncations = {a: False for a in self.agents}
@@ -239,7 +249,10 @@ class LunarRoverMeshEnv(ParallelEnv):
         for agent in self.agent_map.values():
             agent.current_datarate = 0.0  
 
-        
+        # we first need to process the input actions
+        # after these are processed (move, send packets),
+        # then we update all the observation information
+        # including radio maps, connected neighbors
         self._handle_communication_step(actions, rewards, infos)
         
         self._handle_movement_step(actions, rewards, infos)
@@ -322,16 +335,31 @@ class LunarRoverMeshEnv(ParallelEnv):
 
 
     def _handle_communication_step(self, actions, rewards, infos):
+        
+        active_agents = [self.agent_map[aid] for aid in actions.keys() if self.agent_map[aid].energy > 0]
+        
+        # if the bs is connected, get the network state info
+        for agent in active_agents:
+            if agent.bs_connected:
+                # agent learns what bs has
+                agent.network_state["BS_0"].update(self.base_station.packets_received)
+
+                
+        # If agents are neighbors, they also share their net state info
+        for agent in active_agents:
+            for neighbor in agent.neighbors:
+                # we share what we know about the whole network
+                agent.merge_network_state(neighbor.network_state)
+
+        # clean up expired and delivered (to BS) packets
+        for agent in active_agents:
+            agent.cleanup_buffer()
+            agent.drop_expired_packets()
+            
         # comm step
         for agent_id, action in actions.items():
             agent = self.agent_map[agent_id]
             if agent.energy <= 0: continue
-            
-            agent.drop_expired_packets()
-    
-            # random packet generation
-            if np.random.rand() < self.PACKET_GEN_PROB and not self.mission_done.get(agent_id, False):
-                agent.generate_packet(size=10, time_to_live=50, destination="BS_0")
 
             comm_flags = action[1:]
             targets_to_send = []
@@ -352,14 +380,45 @@ class LunarRoverMeshEnv(ParallelEnv):
             # send packets
             if targets_to_send:
                 pre_delivery = self.base_station.num_packets_received
-                agent.send_packet(targets_to_send)
+                if self.packet_mode == 'boolean':
+                    agent.send_packet(targets_to_send)
+                else:
+                    for target in targets_to_send:
+                        agent.send_packets_to_target(target, self.STEP_LENGTH)
                 delivered_now = self.base_station.num_packets_received - pre_delivery
                 rewards[agent_id] += delivered_now * self.REWARD_PACKET_DELIVERY
                 
                 tx_cost = self.COST_TX_5G_PER_STEP * len(targets_to_send)
                 agent.energy -= tx_cost
                 self.total_energy_consumed_step += tx_cost
+               
+    
+            # random packet generation
+            if self.packet_mode == 'boolean':
+                if np.random.rand() < self.PACKET_GEN_PROB and not self.mission_done.get(agent_id, False):
+                    agent.generate_packet(size=10, time_to_live=50, destination="BS_0")
+            else:
+                # constant amount
+                bits_needed = TELEMETRY_RATE_MBPS * 1e6 
+                num_telemetry = int(bits_needed / PACKET_SIZE_BITS)
                 
+                for _ in range(num_telemetry):
+                    agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=60, destination="BS_0")
+
+                # science burst (simulating finding area of interest and generating large amounts of data)
+                if np.random.rand() < BURST_PROBABILITY:
+                    bits_burst = BURST_SIZE_MBITS * 1e6
+                    num_burst = int(bits_burst / PACKET_SIZE_BITS)
+                    
+                    dtn_state = agent.payload_manager.get_state()
+                    space_left = dtn_state['buffer_size'] - dtn_state['payload_size']
+                    
+                    packets_to_gen = min(num_burst, int(space_left / PACKET_SIZE_BITS))
+                    
+                    if packets_to_gen > 0:
+                        for _ in range(packets_to_gen):
+                            agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=300, destination="BS_0")
+                            
         return actions, rewards, infos
 
 
@@ -596,12 +655,12 @@ class LunarRoverMeshEnv(ParallelEnv):
             rssi = self.radio_model.get_signal_strength(agent.x, agent.y, target_rover.x, target_rover.y)
             # 1st bit is don't send, 2nd bit is send
             # rllib expects [valid_no_send, valid_send]
-            mask = [1, 1] if rssi > -90.0 else [1, 0]
+            mask = [1, 1] if rssi > self.MIN_DBM_THRESHOLD else [1, 0]
             comm_masks.append(mask)
         
         # base station mask
         rssi_bs = self.radio_model.get_signal_strength(agent.x, agent.y, self.base_station.x, self.base_station.y)
-        comm_masks.append([1, 1] if rssi_bs > -90.0 else [1, 0])
+        comm_masks.append([1, 1] if rssi_bs > self.MIN_DBM_THRESHOLD else [1, 0])
 
         # flatten the mask for rllib
         action_mask = np.concatenate([move_mask, np.array(comm_masks).flatten()]).astype(np.int8)
