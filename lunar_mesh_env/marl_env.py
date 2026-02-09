@@ -455,29 +455,35 @@ class LunarRoverMeshEnv(ParallelEnv):
             elif move_cmd == 8: dx, dy = -0.707, -0.707 # SW
             
             step_energy = 0.0
-            
+
             if dx != 0 or dy != 0:
                 dist = np.sqrt(dx**2 + dy**2)
                 scale = self.MAX_DIST_PER_STEP / dist
-                new_x = np.clip(agent.x + dx*scale, 0, self.width - 1)
-                new_y = np.clip(agent.y + dy*scale, 0, self.height - 1)
-                
-                # slope check
-                current_z = self.heightmap[int(agent.y), int(agent.x)]
-                target_z = self.heightmap[int(new_y), int(new_x)]
-                height_diff = target_z - current_z
-                
-                if height_diff > self.MAX_INCLINE_PER_STEP:
+
+                new_x = np.clip(agent.x + dx * scale, 0, self.width - 1)
+                new_y = np.clip(agent.y + dy * scale, 0, self.height - 1)
+
+                step_energy, invalid = agent.compute_step_energy_joules(
+                    curr_xy=(agent.x, agent.y),
+                    next_xy=(new_x, new_y),
+                    dt_s=0.1, #self.DT,
+                    max_incline_per_step_m=self.MAX_INCLINE_PER_STEP,
+                )
+
+                if invalid:
                     rewards[agent_id] += self.PENALTY_INVALID_MOVE
-                    step_energy = self.COST_IDLE_PER_STEP 
                 else:
                     agent.x, agent.y = new_x, new_y
                     agent.total_distance += self.MAX_DIST_PER_STEP
-                    incline_cost = max(0, height_diff * 0.5) 
-                    step_energy = self.COST_MOVE_PER_STEP + incline_cost
+
             else:
-                step_energy = self.COST_IDLE_PER_STEP
-            
+                step_energy, _ = agent.compute_step_energy_joules(
+                    curr_xy=(agent.x, agent.y),
+                    next_xy=(agent.x, agent.y),
+                    dt_s=0.1, #self.DT,
+                    max_incline_per_step_m=self.MAX_INCLINE_PER_STEP,
+                )
+
             agent.energy -= step_energy
             self.total_energy_consumed_step += step_energy
 

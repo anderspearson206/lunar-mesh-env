@@ -74,8 +74,6 @@ class MarlMeshDTNAgent(MarlAgent):
         self.goal_y: float = 0.0
         self.is_moving = False 
         self.total_distance = 0.0
-        
-        
                 
         self.heightmap = heightmap
         if heightmap is None:
@@ -85,10 +83,29 @@ class MarlMeshDTNAgent(MarlAgent):
         if radio_model is None:
             raise ValueError("MarlMeshAgent requires a RadioMapModelNN instance.")
         self.radio_model = radio_model
-        
-        
-        # energy
-        self.energy = 2000.0 
+
+        # energy (Joules, if you treat it that way)
+        self.energy = 2000.0
+
+        self.GRAVITATIONAL_CONSTANT = 9.81
+
+        # --- drivetrain / energy model params ---
+        self.BATT_V = 12.0
+        self.N_MOTORS = 4
+
+        # Pololu #4890 @ 12V (no-load current, stall current, stall torque)
+        # https://www.pololu.com/product/4890/specs
+        self.MOTOR_I0_A = 0.060
+        self.MOTOR_I_STALL_A = 0.90
+        self.MOTOR_TAU_STALL_NM = 23.0 * 0.0980665  # 23 kg*cm -> N*m
+
+        # rover physical params (set defaults; you can overwrite from env if needed)
+        self.MASS_KG = 8.0
+        self.WHEEL_RADIUS_M = 0.06
+        self.CRR = 0.1  # rolling resistance coeff "hard ground" ~0.01-0.03, "sand/loose dirt" ~0.05-0.2
+
+        # optional skid-steer turning scrub model (set 0 to disable)
+        self.TURN_SCRUB_W_PER_RADPS = 0.0
         
         # dtn logic
         self.neighbors: set['MarlAgent'] = set()
@@ -300,9 +317,94 @@ class MarlMeshDTNAgent(MarlAgent):
             "radio_map": rm_obs
         }
 
+    def compute_step_energy_joules(
+        self,
+        curr_xy: tuple[float, float],
+        next_xy: tuple[float, float],
+        dt_s: float,
+        max_incline_per_step_m: float,
+        *,
+        yaw_rate_rad_s: float = 0.0,
+        downhill_cost_mode: str = "none",  # "none" | "brake"
+        invalid_move_draw_idle: bool = True,
+    ) -> tuple[float, bool]:
+        """
+        Returns (energy_J, invalid_move).
+        Uses agent heightmap and agent motor/rover params stored in self.*.
+        """
+        x0, y0 = curr_xy
+        x1, y1 = next_xy
 
+        dx = float(x1 - x0)
+        dy = float(y1 - y0)
+        dxy = float(np.sqrt(dx*dx + dy*dy))
+        dt = float(max(dt_s, 1e-6))
 
+        # idle power baseline: P = VI
+        p_idle = self.N_MOTORS * self.BATT_V * self.MOTOR_I0_A
 
+        # no movement
+        if dxy <= 1e-9:
+            p_turn = self.TURN_SCRUB_W_PER_RADPS * abs(float(yaw_rate_rad_s))
+            return (p_idle + p_turn) * dt, False
+
+        # heightmap lookup
+        H, W = self.heightmap.shape[:2]
+        ix0 = int(np.clip(np.floor(x0), 0, W - 1))
+        iy0 = int(np.clip(np.floor(y0), 0, H - 1))
+        ix1 = int(np.clip(np.floor(x1), 0, W - 1))
+        iy1 = int(np.clip(np.floor(y1), 0, H - 1))
+
+        z0 = float(self.heightmap[iy0, ix0])
+        z1 = float(self.heightmap[iy1, ix1])
+        dz = float(z1 - z0)
+
+        # incline constraint
+        if dz > float(max_incline_per_step_m):
+            if invalid_move_draw_idle:
+                p_turn = self.TURN_SCRUB_W_PER_RADPS * abs(float(yaw_rate_rad_s))
+                return (p_idle + p_turn) * dt, True
+            return 0.0, True
+
+        # slope
+        grade = dz / max(dxy, 1e-6)
+        theta = float(np.arctan(grade))
+
+        g = self.GRAVITATIONAL_CONSTANT
+        m = self.MASS_KG
+
+        # rolling resistance + slope component
+        # F_req = C_rr * mgcos(theta) + mgsin(theta)
+        f_roll = self.CRR * m * g * float(np.cos(theta))
+        f_slope = m * g * float(np.sin(theta))
+
+        if downhill_cost_mode == "none":
+            f_slope_term = max(0.0, f_slope)
+        elif downhill_cost_mode == "brake":
+            f_slope_term = abs(f_slope)
+        else:
+            raise ValueError("downhill_cost_mode must be 'none' or 'brake'")
+
+        f_req = f_roll + f_slope_term
+
+        # brushed DC motor approximation: current increases roughly linearly with torque
+        tau_total = f_req * self.WHEEL_RADIUS_M # Total torque 
+        tau_per_wheel = tau_total / self.N_MOTORS # Torque per wheel
+
+        # between no-load and stall:
+        #   1. No-load:  τ = 0        → current = I0
+        #   2. Stall:    τ = τ_stall  → current = I_stall
+        tau = float(np.clip(tau_per_wheel, 0.0, self.MOTOR_TAU_STALL_NM))
+
+        # I(τ) ≈ I0 + (τ/τ_stall)(I_stall - I0)
+        i_per = self.MOTOR_I0_A + (tau / self.MOTOR_TAU_STALL_NM) * (self.MOTOR_I_STALL_A - self.MOTOR_I0_A)
+
+        # Then: P = V*I
+        p_drive = self.N_MOTORS * self.BATT_V * i_per
+        # Skid steer loses for Astrobotic rover
+        p_turn = self.TURN_SCRUB_W_PER_RADPS * abs(float(yaw_rate_rad_s))
+        # E = P*dt in Joules. For Wh divide by 3600
+        return (p_drive + p_turn) * dt, False
 
 
 
