@@ -16,6 +16,13 @@ class Packet:
         self.source = source
         self.destination = destination
         self.touched = {source}
+    
+    def copy(self):
+        new_packet = Packet(self.source, self.destination, self.size, self.time_to_live)
+        new_packet.packet_id = self.packet_id
+        new_packet.timestamp = self.timestamp
+        new_packet.touched = set(self.touched)
+        return new_packet
 
 
 class PayloadManager:
@@ -31,7 +38,7 @@ class PayloadManager:
             packet = self.buffer.popleft()
             self.payload_size -= packet.size
             for target in targets:
-                target.receive_packet(packet)
+                target.receive_packet(packet.copy())
     
     def send_packets_rate_aware(self, target_agent, target_known_packets: Set[str], 
                                 data_rate_mbps: float, step_duration: float) -> int:
@@ -66,7 +73,7 @@ class PayloadManager:
 
         # send / copy to target
         for p in packets_to_deliver:
-            target_agent.receive_packet(p)
+            target_agent.receive_packet(p.copy())
             
         return sent_count
 
@@ -93,8 +100,19 @@ class PayloadManager:
             packet = self.buffer.popleft()
             self.buffer.appendleft(packet)  
             for target in targets:
-                target.receive_packet(packet)
-                
+                target.receive_packet(packet.copy())
+
+    def send_all_packets(self, targets):
+        current_time = time()
+        new_buffer = deque()
+        for packet in self.buffer:
+            if current_time - packet.timestamp <= packet.time_to_live:
+                new_buffer.append(packet)
+                for target in targets:
+                    target.receive_packet(packet.copy())
+
+        self.buffer = new_buffer         
+    
     def drop_expired_packets(self):
         current_time = time()
         while len(self.buffer) > 0:

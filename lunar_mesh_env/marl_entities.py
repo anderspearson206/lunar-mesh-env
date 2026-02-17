@@ -560,6 +560,9 @@ class MarlDtnAgent(MarlAgent):
     def send_packet(self, targets:list[MarlAgent|BaseStation]):
         self.payload_manager.send_packet(targets)
 
+    def send_all_packets(self, targets:list[MarlAgent|BaseStation]):
+        self.payload_manager.send_all_packets(targets)
+
     def receive_packet(self, packet:Packet):
         self.payload_manager.receive_packet(packet)
 
