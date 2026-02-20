@@ -109,15 +109,15 @@ def render_frame(agents, base_station, heightmap, step, color_map, links):
     return frame
 
 def main():
-    DATA_ROOT = 'C:/Users/abnvg/OneDrive/Documents/SensorSystems/NASA_DCGR_NETWORKING/radio_data_2/radio_data_2'
+    DATA_ROOT = '../../NASA_DCGR_NETWORKING/radio_data_2/radio_data_2'
+    # Update this path if you are running locally without the full dataset
     HM_PATH = f'{DATA_ROOT}/hm/hm_18.npy'
     
     MODEL_PATHS = {
-        'k2_model': 'C:/Users/abnvg/OneDrive/Documents/SensorSystems/lunar-mesh-env/RadioLunaDiff/pretrained_models_network/k2unet/best_k2_model.pth',
-        'pmnet_model': 'C:/Users/abnvg/OneDrive/Documents/SensorSystems/lunar-mesh-env/RadioLunaDiff/pretrained_models_network/pmnet/best_pm_model.pt',
-        'diffusion_model': 'C:/Users/abnvg/OneDrive/Documents/SensorSystems/lunar-mesh-env/RadioLunaDiff/pretrained_models_network/diffusion'
+        'k2_model': '../RadioLunaDiff/pretrained_models_network/k2unet/best_k2_model.pth',
+        'pmnet_model': '../RadioLunaDiff/pretrained_models_network/pmnet/best_pm_model.pt',
+        'diffusion_model': '../RadioLunaDiff/pretrained_models_network/diffusion'
     }
-    
     # load models
     print("Loading models...")
     try:
@@ -133,7 +133,8 @@ def main():
         heightmap=global_hm,
         env_width=256, 
         env_height=256,
-        device=device
+        device=device, 
+        dummy_mode=True
     )
 
     # Environment setup
