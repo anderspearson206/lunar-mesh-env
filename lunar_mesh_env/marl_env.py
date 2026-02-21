@@ -75,7 +75,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.COST_TX_5G_PER_STEP = 1.0
         self.COST_TX_415_PER_STEP = 2.0
         self.COST_IDLE_PER_STEP = 0.1
-        self.EP_MAX_TIME = 300
+        self.EP_MAX_TIME = 2000
         self.MIN_DBM_THRESHOLD = -82.0 # look at get_throughput_rss() in radio_model_nn.py
         # Reward Config
         self.REWARD_PEER_LINK = 1.0
@@ -118,7 +118,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         # bridges petting zoo agent_id to actual agent object
         self.agent_map = {}
         for i, agent_id in enumerate(self.agents):
-            self.agent_map[agent_id] = MeshAgent(ue_id=i+1, 
+            self.agent_map[agent_id] = MeshAgent(ue_id=i, 
                                                  heightmap=self.heightmap,
                                                  radio_model=self.radio_model, 
                                                  bs=self.base_station, 

@@ -65,7 +65,7 @@ class MarlMeshDTNAgent(MarlAgent):
                  bs: BaseStation = None):        
         
         self.ue_id = ue_id 
-        self.id = f"MarlAgent_{ue_id}" 
+        self.id = f"rover_{ue_id}" 
         
         # position and movement state
         self.x = x
