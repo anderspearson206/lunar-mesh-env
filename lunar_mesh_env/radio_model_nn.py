@@ -29,6 +29,7 @@ class RadioMapModelNN:
                  num_inference_steps: int = 4,
                  image_size: int = 256,
                  dummy_mode: bool = False,
+                 max_cache_size: int = 1000,
                  device: str = None):
         
         # print("Initializing Generative RadioMapModel...")
@@ -41,6 +42,7 @@ class RadioMapModelNN:
 
 
         self.cache = {}
+        self.max_cache_size = max_cache_size
         self.image_size = image_size
         self.width = env_width
         self.height = env_height
@@ -140,7 +142,14 @@ class RadioMapModelNN:
         """Stores a generated map into the internal cache."""
         key = (int(x), int(y), frequency)
         self.cache[key] = radio_map
+        self._enforce_cache_limit()
 
+    def _enforce_cache_limit(self):
+        """Ensures the cache does not exceed max_cache_size using a FIFO policy."""
+        while len(self.cache) > self.max_cache_size:
+            oldest_key = next(iter(self.cache))
+            del self.cache[oldest_key]
+    
     def clear_cache(self):
         self.cache = {}
         
@@ -237,6 +246,7 @@ class RadioMapModelNN:
                 key = self._get_cache_key(*pos, frequency)
                 self.cache[key] = m
                 results[idx] = m
+            self._enforce_cache_limit()
 
         return np.array(results)
     
