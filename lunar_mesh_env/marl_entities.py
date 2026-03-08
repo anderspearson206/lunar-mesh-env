@@ -20,16 +20,30 @@ class BaseStation:
         self.num_packets_received = 0
         self.num_duplicates_received = 0
         self.packets_received = set()
+        self.delivered_metrics = []
 
     def get_position(self) -> Tuple[float, float]:
         return (self.x, self.y)
 
-    def receive_packet(self, packet:Packet):
+    def receive_packet(self, packet: Packet, current_step: int):
         self.num_packets_received += 1
         if packet.packet_id in self.packets_received:
             self.num_duplicates_received += 1
         else:
             self.packets_received.add(packet.packet_id)
+            
+            # Calculate space-time metrics on first arrival
+            delay_steps = current_step - packet.gen_step
+            distance_m = np.sqrt((self.x - packet.origin_x)**2 + (self.y - packet.origin_y)**2)
+            
+            self.delivered_metrics.append({
+                'packet_id': packet.packet_id,
+                'size_bits': packet.size,
+                'delay_steps': delay_steps,
+                'distance_m': distance_m,
+                'gen_step': packet.gen_step,
+                'deliv_step': current_step
+            })
     
     def get_state(self):
         state = {
@@ -46,7 +60,7 @@ class MarlAgent(ABC):
     Abstract Base Class for Agents in the Lunar Mesh Environment.
     """
     @abstractmethod
-    def receive_packet(self, packet:Packet):
+    def receive_packet(self, packet:Packet, current_step: int):
         pass
     
     
@@ -133,7 +147,7 @@ class MarlMeshDTNAgent(MarlAgent):
             return NotImplemented
         return self.ue_id < other.ue_id
     
-    def receive_packet(self, packet: Packet):
+    def receive_packet(self, packet: Packet, current_step: int):
         self.payload_manager.receive_packet(packet)
         self.network_state[self.id].add(packet.packet_id)
         
@@ -145,10 +159,10 @@ class MarlMeshDTNAgent(MarlAgent):
             self.network_state[agent_id].update(packet_set)
             
 
-    def send_packet(self, targets: List[MarlAgent|BaseStation]):
-        self.payload_manager.send_packet(targets)
+    def send_packet(self, targets: List[MarlAgent|BaseStation], current_step: int):
+        self.payload_manager.send_packet(targets, current_step)
         
-    def send_packets_to_target(self, target, step_duration):
+    def send_packets_to_target(self, target, step_duration, current_step: int):
         """
         for rate based sending 
         """
@@ -160,7 +174,7 @@ class MarlMeshDTNAgent(MarlAgent):
         
         # Send
         sent_count = self.payload_manager.send_packets_rate_aware(
-            target, target_known, data_rate, step_duration
+            target, target_known, data_rate, step_duration, current_step
         )
         
         return sent_count
@@ -175,7 +189,7 @@ class MarlMeshDTNAgent(MarlAgent):
             self.payload_manager.cleanup_acked_packets(acked_ids)
             
     
-    def send_packets(self, targets: List[MarlAgent|BaseStation], step_duration: float):
+    def send_packets(self, targets: List[MarlAgent|BaseStation], step_duration: float, sim_time: float):
         """
         Sends packets to multiple targets based on calculated throughput.
         """
@@ -183,17 +197,14 @@ class MarlMeshDTNAgent(MarlAgent):
             # get throughput based on pos
             rate = self.radio_model.get_throughput_pos(self.x, self.y, target.x, target.y, freq='5.8')
             
-            # 3. Send payload
-            # Optional: If the medium is shared (TDMA), you might divide step_duration 
-            # by len(targets). For now, we assume parallel links (FDMA/CDMA).
             if rate > 0:
-                self.payload_manager.send_packets(target, rate, step_duration)
+                self.payload_manager.send_packets(target, rate, step_duration, sim_time)
 
-    def generate_packet(self, size: int, time_to_live: float, destination: str):
-        self.payload_manager.generate_packet(size, time_to_live, destination)
+    def generate_packet(self, size: int, time_to_live: float, destination: str, time:float):
+        self.payload_manager.generate_packet(size, time_to_live, destination, time, self.x, self.y)
 
-    def drop_expired_packets(self):
-        self.payload_manager.drop_expired_packets()
+    def drop_expired_packets(self, time: float):
+        self.payload_manager.drop_expired_packets(time)
     
     def update_neighbors(self, 
                         all_agents: List['MarlMeshAgent'], 

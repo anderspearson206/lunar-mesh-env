@@ -7,14 +7,16 @@ from typing import Set, Dict, List
 class Packet:
     counter = 0
 
-    def __init__(self, source, destination, size, time_to_live):
+    def __init__(self, source, destination, size, time_to_live, gen_step, origin_x, origin_y):
         self.packet_id = f"P_{Packet.counter}"
         Packet.counter += 1
         self.size = size
-        self.timestamp = time()
+        self.gen_step = gen_step  
         self.time_to_live = time_to_live
         self.source = source
         self.destination = destination
+        self.origin_x = origin_x
+        self.origin_y = origin_y
         self.touched = {source}
 
 
@@ -26,15 +28,15 @@ class PayloadManager:
         self.buffer_size = buffer_size
         self.payload_size = 0 
     
-    def send_packet(self, targets):
+    def send_packet(self, targets, current_step: int):
         if len(self.buffer) > 0:
             packet = self.buffer.popleft()
             self.payload_size -= packet.size
             for target in targets:
-                target.receive_packet(packet)
-    
+                target.receive_packet(packet, current_step)
+        
     def send_packets_rate_aware(self, target_agent, target_known_packets: Set[str], 
-                                data_rate_mbps: float, step_duration: float) -> int:
+                                data_rate_mbps: float, step_duration: float, current_step: int) -> int:
         """
         Iterates through buffer, sends what the target 
         doesn't have, up to the bandwidth limit.
@@ -66,7 +68,7 @@ class PayloadManager:
 
         # send / copy to target
         for p in packets_to_deliver:
-            target_agent.receive_packet(p)
+            target_agent.receive_packet(p, current_step)
             
         return sent_count
 
@@ -95,13 +97,11 @@ class PayloadManager:
             for target in targets:
                 target.receive_packet(packet)
                 
-    def drop_expired_packets(self):
-        current_time = time()
+    def drop_expired_packets(self, current_step):
+        # Update to use simulation steps instead of time()
         while len(self.buffer) > 0:
             packet = self.buffer[0]
-            if current_time - packet.timestamp > packet.time_to_live:
-                # print(f"Packet {packet.packet_id} expired and dropped from agent {self.id}'s buffer.")
-                # print(f"Time in buffer: {current_time - packet.timestamp:.2f}s, TTL: {packet.time_to_live}s")
+            if current_step - packet.gen_step > packet.time_to_live:
                 self.buffer.popleft()
                 self.payload_size -= packet.size
             else:
@@ -121,12 +121,14 @@ class PayloadManager:
         self.buffer.append(packet)
         self.payload_size += packet.size
 
-    def generate_packet(self, size, time_to_live, destination):
+    def generate_packet(self, size, time_to_live, destination, current_step, origin_x, origin_y):
         while size + self.payload_size > self.buffer_size:
             packet = self.buffer.popleft()
             self.payload_size -= packet.size
         
-        packet = Packet(source=self.id, destination=destination, size=size, time_to_live=time_to_live)
+        packet = Packet(source=self.id, destination=destination, size=size, 
+                        time_to_live=time_to_live, gen_step=current_step, 
+                        origin_x=origin_x, origin_y=origin_y)
         self.buffer.append(packet)
         self.payload_size += size
         self.num_packets_generated += 1

@@ -197,14 +197,14 @@ class RadioMapModelNN:
             R_cr = [1.0/2.0, 3.0/4.0, 2.0/3.0]
             
             # can be found in  table 17-18
-            if rss >= -65: return N_dsc*N_bpsc['64-QAM']*R_cr[1]/T_symbol  # 64-QAM 3/4, 54Mbps
-            if rss >= -66: return N_dsc*N_bpsc['64-QAM']*R_cr[2]/T_symbol  # 64-QAM 2/3, 48Mbps
-            if rss >= -70: return N_dsc*N_bpsc['16-QAM']*R_cr[1]/T_symbol  # 16-QAM 3/4, 36Mbps
-            if rss >= -74: return N_dsc*N_bpsc['16-QAM']*R_cr[0]/T_symbol  # 16-QAM 1/2, 24Mbps
-            if rss >= -77: return N_dsc*N_bpsc['QPSK']*R_cr[1]/T_symbol   # QPSK 3/4, 18Mbps
-            if rss >= -79: return N_dsc*N_bpsc['QPSK']*R_cr[0]/T_symbol   # QPSK 1/2, 12Mbps
-            if rss >= -81: return N_dsc*N_bpsc['BPSK']*R_cr[1]/T_symbol   # BPSK 3/4, 9Mbps
-            if rss >= -82: return N_dsc*N_bpsc['BPSK']*R_cr[0]/T_symbol   # BPSK 1/2, 6Mbps
+            if rss >= -65: return (N_dsc*N_bpsc['64-QAM']*R_cr[1]/T_symbol)/1e6  # 64-QAM 3/4, 54Mbps
+            if rss >= -66: return (N_dsc*N_bpsc['64-QAM']*R_cr[2]/T_symbol)/1e6  # 64-QAM 2/3, 48Mbps
+            if rss >= -70: return (N_dsc*N_bpsc['16-QAM']*R_cr[1]/T_symbol)/1e6  # 16-QAM 3/4, 36Mbps
+            if rss >= -74: return (N_dsc*N_bpsc['16-QAM']*R_cr[0]/T_symbol)/1e6  # 16-QAM 1/2, 24Mbps
+            if rss >= -77: return (N_dsc*N_bpsc['QPSK']*R_cr[1]/T_symbol)/1e6 # QPSK 3/4, 18Mbps
+            if rss >= -79: return (N_dsc*N_bpsc['QPSK']*R_cr[0]/T_symbol)/1e6 # QPSK 1/2, 12Mbps
+            if rss >= -81: return (N_dsc*N_bpsc['BPSK']*R_cr[1]/T_symbol)/1e6 # BPSK 3/4, 9Mbps
+            if rss >= -82: return (N_dsc*N_bpsc['BPSK']*R_cr[0]/T_symbol)/1e6 # BPSK 1/2, 6Mbps
             return 0.0                  # Disconnected
 
         elif frequency_band == '415':

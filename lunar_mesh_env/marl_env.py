@@ -19,10 +19,10 @@ from .radio_model_nn import RadioMapModelNN
 from .pathfinding import a_star_search_rm as a_star_search
 
 
-PACKET_SIZE_BITS = 100 * 1024 # 100 Kb per packet
+PACKET_SIZE_BITS = 10000000
 BURST_SIZE_MBITS = 10.0       # A "science event" generates 50 Mb of data
-TELEMETRY_RATE_MBPS = 0.5     # Constant 0.5 Mbps background stream
-BURST_PROBABILITY = 0.30
+TELEMETRY_RATE_MBPS = 50      # Constant 0.5 Mbps background stream
+BURST_PROBABILITY = 0.0
 
 def set_seed(seed=42):
     """Sets all possible seeds for reproducibility."""
@@ -44,6 +44,8 @@ class LunarRoverMeshEnv(ParallelEnv):
                  render_mode=None,
                  num_goals = 5,
                  packet_mode = 'boolean',
+                 buffer_capacity_bits = 100*1024**3, # 100 GB buffer capacity
+                 data_rate_mbps = 10.0,
                  seed=206):
         
         self.render_mode = render_mode
@@ -70,17 +72,17 @@ class LunarRoverMeshEnv(ParallelEnv):
         
         
         # Energy & Rewards
-        self.START_ENERGY = 50000.0
+        self.START_ENERGY = 5000000.0
         self.COST_MOVE_PER_STEP = 5.0
         self.COST_TX_5G_PER_STEP = 1.0
         self.COST_TX_415_PER_STEP = 2.0
         self.COST_IDLE_PER_STEP = 0.1
-        self.EP_MAX_TIME = 2000
+        self.EP_MAX_TIME = 20000
         self.MIN_DBM_THRESHOLD = -82.0 # look at get_throughput_rss() in radio_model_nn.py
         # Reward Config
         self.REWARD_PEER_LINK = 1.0
         self.REWARD_BS_LINK = 5.0 
-        
+        self.TELEMETRY_RATE_MBPS = data_rate_mbps
         # The rovers know how to reach the goal (preset path)
         # but since we allow them to leave the path for comms, 
         # we need to reward them for arriving.
@@ -114,7 +116,9 @@ class LunarRoverMeshEnv(ParallelEnv):
         # petting zoo style 
         self.possible_agents = [f"rover_{i}" for i in range(num_agents)]
         self.agents = self.possible_agents[:]
-        self.buffer_capacity_bits = 1000 * 1024 * 1024
+        # this capacity is unreasonably large to avoid overflow and test 
+        # data rate.
+        self.buffer_capacity_bits = buffer_capacity_bits
         # bridges petting zoo agent_id to actual agent object
         self.agent_map = {}
         for i, agent_id in enumerate(self.agents):
@@ -354,7 +358,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         # clean up expired and delivered (to BS) packets
         for agent in active_agents:
             agent.cleanup_buffer()
-            agent.drop_expired_packets()
+            agent.drop_expired_packets(self.sim_time)
             
         # comm step
         for agent_id, action in actions.items():
@@ -381,10 +385,10 @@ class LunarRoverMeshEnv(ParallelEnv):
             if targets_to_send:
                 pre_delivery = self.base_station.num_packets_received
                 if self.packet_mode == 'boolean':
-                    agent.send_packet(targets_to_send)
+                    agent.send_packet(targets_to_send, self.sim_time)
                 else:
                     for target in targets_to_send:
-                        agent.send_packets_to_target(target, self.STEP_LENGTH)
+                        agent.send_packets_to_target(target, self.STEP_LENGTH, self.sim_time)
                 delivered_now = self.base_station.num_packets_received - pre_delivery
                 rewards[agent_id] += delivered_now * self.REWARD_PACKET_DELIVERY
                 
@@ -396,14 +400,14 @@ class LunarRoverMeshEnv(ParallelEnv):
             # random packet generation
             if self.packet_mode == 'boolean':
                 if np.random.rand() < self.PACKET_GEN_PROB and not self.mission_done.get(agent_id, False):
-                    agent.generate_packet(size=10, time_to_live=50, destination="BS_0")
+                    agent.generate_packet(size=10, time_to_live=50, destination="BS_0", time=self.sim_time)
             else:
                 # constant amount
-                bits_needed = TELEMETRY_RATE_MBPS * 1e6 
+                bits_needed = self.TELEMETRY_RATE_MBPS * self.STEP_LENGTH * 1e6
                 num_telemetry = int(bits_needed / PACKET_SIZE_BITS)
                 
                 for _ in range(num_telemetry):
-                    agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=60, destination="BS_0")
+                    agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=5000, destination="BS_0", time=self.sim_time)
 
                 # science burst (simulating finding area of interest and generating large amounts of data)
                 if np.random.rand() < BURST_PROBABILITY:
@@ -417,7 +421,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                     
                     if packets_to_gen > 0:
                         for _ in range(packets_to_gen):
-                            agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=300, destination="BS_0")
+                            agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=5000, destination="BS_0", time=self.sim_time)
                             
         return actions, rewards, infos
 
