@@ -1,7 +1,7 @@
 import numpy as np
 from typing import List, Dict, Tuple
 from abc import ABC, abstractmethod
-from .payload_manager import Packet, PayloadManager
+from .payload_manager import Packet, PayloadManager, HistoryTracker
 
 from .radio_model_nn import RadioMapModelNN
 from collections import defaultdict
@@ -76,7 +76,8 @@ class MarlMeshDTNAgent(MarlAgent):
                  heightmap: np.ndarray = None,
                  radio_model: 'RadioMapModelNN' = None,
                  buffer_size: int = 1000, 
-                 bs: BaseStation = None):        
+                 bs: BaseStation = None, 
+                 nodes: int = 4):        
         
         self.ue_id = ue_id 
         self.id = f"rover_{ue_id}" 
@@ -137,8 +138,16 @@ class MarlMeshDTNAgent(MarlAgent):
         
         self.nav_path: List[Tuple[int, int]] = []  # pathfinding state
         
+        self.history_tracker = HistoryTracker(bucket_size_steps=50) # 50 steps = 1000s if step=20s
+        self.lambda_param = 0.04 # this was tuned based on interencounter times
+        self.total_nodes = nodes
+        self.num_duplicates_received = 0
+        
 
     def __str__(self):
+        return self.id
+    
+    def __repr__(self):
         return self.id
 
     def __lt__(self, other):
@@ -148,6 +157,10 @@ class MarlMeshDTNAgent(MarlAgent):
         return self.ue_id < other.ue_id
     
     def receive_packet(self, packet: Packet, current_step: int):
+        if packet.packet_id in self.network_state[self.id]:
+            self.num_duplicates_received += 1
+            return 
+
         self.payload_manager.receive_packet(packet)
         self.network_state[self.id].add(packet.packet_id)
         

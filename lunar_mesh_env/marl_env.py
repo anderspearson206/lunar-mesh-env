@@ -19,7 +19,7 @@ from .radio_model_nn import RadioMapModelNN
 from .pathfinding import a_star_search_rm as a_star_search
 
 
-PACKET_SIZE_BITS = 10000000
+PACKET_SIZE_BITS = 500000
 BURST_SIZE_MBITS = 10.0       # A "science event" generates 50 Mb of data
 TELEMETRY_RATE_MBPS = 50      # Constant 0.5 Mbps background stream
 BURST_PROBABILITY = 0.0
@@ -45,9 +45,9 @@ class LunarRoverMeshEnv(ParallelEnv):
                  num_goals = 5,
                  packet_mode = 'boolean',
                  buffer_capacity_bits = 100*1024**3, # 100 GB buffer capacity
-                 data_rate_mbps = 10.0,
+                 data_rate_mbps = 0.5,
                  seed=206):
-        
+
         self.render_mode = render_mode
         self.hm_path = hm_path
         self.radio_model = radio_model
@@ -126,7 +126,8 @@ class LunarRoverMeshEnv(ParallelEnv):
                                                  heightmap=self.heightmap,
                                                  radio_model=self.radio_model, 
                                                  bs=self.base_station, 
-                                                 buffer_size=self.buffer_capacity_bits)
+                                                 buffer_size=self.buffer_capacity_bits, 
+                                                 nodes=num_agents)
 
 
         self.observation_spaces = {
