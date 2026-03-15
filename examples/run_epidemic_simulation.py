@@ -1,116 +1,44 @@
 import numpy as np
-import matplotlib.pyplot as plt
-from random import randint
+import random
 import imageio
 import torch
 import sys
 import os
 
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-
-COLORS = ['blue', 'purple', 'green', 'orange', 'red']
-
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from lunar_mesh_env import RadioMapModelNN
-from lunar_mesh_env.marl_entities import MarlDtnAgent, BaseStation
+from lunar_mesh_env import LunarRoverMeshEnv, RadioMapModelNN
 
-def get_signal_strength(radio_map, target_agent, width, height):
-        """
-        Gets the signal strength (dBm) from a given radio_map at target's location.
-        """
-        if radio_map is None:
-            return -np.inf 
-        
-        map_shape = radio_map.shape
-        
-        col_idx = int((target_agent.x / width) * (map_shape[1] - 1))
-        row_idx = int((target_agent.y / height) * (map_shape[0] - 1))
-        
-        col_idx = np.clip(col_idx, 0, map_shape[1] - 1)
-        row_idx = np.clip(row_idx, 0, map_shape[0] - 1)
-        
-        return radio_map[row_idx, col_idx]
 
-def render_frame(agents, base_station, heightmap, step, color_map, links):
-    """Render the current simulation state."""
-    width, height = 256.0, 256.0
-    
-    fig = plt.figure(figsize=(18, 6), dpi=80)
-    gs = fig.add_gridspec(ncols=3, nrows=1, width_ratios=[2, 1, 1], 
-                          hspace=0.3, wspace=0.3,
-                          top=0.92, bottom=0.15, left=0.05, right=0.95)
-    
-    # Main simulation view
-    sim_ax = fig.add_subplot(gs[0])
-    sim_ax.imshow(heightmap, cmap='terrain', extent=[0, width, 0, height], origin='lower', zorder=0)
-    
-    # Draw base station
-    sim_ax.scatter(base_station.x, base_station.y, s=400, c='cyan', marker='^', 
-                   edgecolors='black', linewidths=2, zorder=3, label="Base Station")
-    sim_ax.annotate("BS", xy=(base_station.x, base_station.y), xytext=(0, 15), 
-                    textcoords='offset points', ha='center', color='cyan', 
-                    fontweight='bold', fontsize=12)
-    
-    # Draw agents
-    for i, agent in enumerate(agents):
-        color = color_map.get(agent.id, COLORS[i % len(COLORS)])
-        sim_ax.scatter(agent.x, agent.y, s=300, zorder=2, color=color, marker="o", 
-                       edgecolors='white', linewidths=2)
-        label = chr(ord('A') + i)
-        sim_ax.annotate(label, xy=(agent.x, agent.y), ha="center", va="center", 
-                        color='white', fontweight='bold', fontsize=10)
+def build_epidemic_actions(env):
+    """Build actions that forward to every currently connected target."""
+    actions = {}
+    num_rovers = len(env.possible_agents)
 
-    # Draw sent packet links
-    for sender, receiver in links:
-        color = color_map.get(sender.id, 'black')
-        sim_ax.plot([sender.x, receiver.x], [sender.y, receiver.y], color=color, linewidth=2.5, alpha=0.9)
-    
-    sim_ax.set_xlim([0, width])
-    sim_ax.set_ylim([0, height])
-    sim_ax.set_title(f'DTN Simulation - Step {step}', fontweight='bold', fontsize=14)
-    sim_ax.axis('off')
-    
-    # Agent packet counts
-    packet_ax = fig.add_subplot(gs[1])
-    packet_ax.axis('off')
-    packet_ax.set_title('Agent Packet Status', fontweight='bold', fontsize=12)
-    
-    text_lines = []
-    for i, agent in enumerate(agents):
-        label = chr(ord('A') + i)
-        state = agent.payload_manager.get_state()
-        text_lines.append(f"Agent {label}: {state['num_packets']} packets (generated: {state['num_packets_generated']})")
-    
-    text_str = '\n\n'.join(text_lines)
-    packet_ax.text(0.5, 0.5, text_str, ha='center', va='center', 
-                   fontsize=11, family='monospace')
-    
-    # Base station status
-    bs_ax = fig.add_subplot(gs[2])
-    bs_ax.axis('off')
-    bs_ax.set_title('Base Station Status', fontweight='bold', fontsize=12)
-    
-    bs_state = base_station.get_state()
-    bs_text = (f"Base Station:\n\n"
-               f"Packets received: {bs_state['num_packets_received']}\n\n"
-               f"Duplicates received: {bs_state['num_duplicates_received']}")
-    
-    bs_ax.text(0.5, 0.5, bs_text, ha='center', va='center',
-               fontsize=11, family='monospace')
-    
-    # Convert to RGB array
-    canvas = FigureCanvas(fig)
-    canvas.draw()
-    data = np.frombuffer(canvas.tostring_rgb(), dtype=np.uint8)
-    frame = data.reshape(canvas.get_width_height()[::-1] + (3,))
-    plt.close(fig)
-    
-    return frame
+    for agent_id in env.agents:
+        agent = env.agent_map[agent_id]
+        if agent.energy <= 0:
+            continue
+
+        action = [random.randint(0,8)] + [0] * (num_rovers + 1)
+
+        for i, target_id in enumerate(env.possible_agents):
+            if target_id == agent_id:
+                continue
+
+            target = env.agent_map.get(target_id)
+            if target is not None and target in agent.neighbors:
+                action[i + 1] = 1
+
+        if agent.bs_connected:
+            action[-1] = 1
+
+        actions[agent_id] = np.array(action, dtype=np.int64)
+
+    return actions
 
 def main():
     DATA_ROOT = '../../NASA_DCGR_NETWORKING/radio_data_2/radio_data_2'
-    # Update this path if you are running locally without the full dataset
     HM_PATH = f'{DATA_ROOT}/hm/hm_18.npy'
     
     MODEL_PATHS = {
@@ -118,7 +46,7 @@ def main():
         'pmnet_model': '../RadioLunaDiff/pretrained_models_network/pmnet/best_pm_model.pt',
         'diffusion_model': '../RadioLunaDiff/pretrained_models_network/diffusion'
     }
-    # load models
+
     print("Loading models...")
     try:
         global_hm = np.load(HM_PATH)
@@ -133,44 +61,39 @@ def main():
         heightmap=global_hm,
         env_width=256, 
         env_height=256,
-        device=device, 
-        dummy_mode=True
+        device=device
     )
 
-    # Environment setup
-    agents = [MarlDtnAgent(90 , 90), MarlDtnAgent(90 , 160), MarlDtnAgent(160 , 90)]
-    color_map = {agent.id: COLORS[i % len(COLORS)] for i, agent in enumerate(agents)}
-    agent_maps = {agent.id: radio_model.generate_map((agent.x, agent.y), frequency='5.8') for agent in agents}
-    
-    base_station = BaseStation(x=170.0, y=170.0)
+    env = LunarRoverMeshEnv(
+        hm_path=HM_PATH,
+        radio_model=radio_model,
+        num_agents=3,
+        render_mode="rgb_array"
+    )
+
+    obs, info = env.reset()
     frames = []
     
     print("Starting simulation...")
-    for step in range(50):
-        links = []
-        for agent in agents:
-            print(f'\nstep {step} - {agent.id}')
-            targets = []
-            for target in agents + [base_station]:
-                if target.id != agent.id:
-                    signal_strength = get_signal_strength(agent_maps[agent.id], target, 256, 256)
-                    if signal_strength > -100.0:  # Threshold for communication, taken from ROBUST THRESH DBM
-                        targets.append(target)
-                        links.append((agent, target))
+    for step in range(10):
+        actions = build_epidemic_actions(env)
+        obs, rewards, terms, truncs, infos = env.step(actions)
 
-            if targets:
-                print(f"{agent.id} sending packet to {[t.id for t in targets]}\n")
-                agent.send_all_packets(targets)
+        frame = env.render()
+        if frame is not None:
+            frames.append(frame)
+        
+        if step % 1 == 0:
+            r0 = rewards.get('rover_0', 0.0)
+            print(
+                f"Step {step}: Agent 0 Reward: {r0:.2f}, "
+                f"BS unique: {env.unique_packets_rcvd}, raw: {env.total_packets_rcvd}"
+            )
 
-            if randint(0, 1) == 1:
-                agent.generate_packet(size=50, time_to_live=2, destination=base_station.id)
-        
-        # Render frame
-        frame = render_frame(agents, base_station, global_hm, step, color_map, links)
-        frames.append(frame)
-        
-        if step % 10 == 0:
-            print(f"Step {step}: BS received {base_station.num_packets_received} packets")
+        if all(terms.values()) or all(truncs.values()):
+            break
+
+    env.close()
     
     if frames:
         print(f"Saving GIF ({len(frames)} frames)...")
