@@ -144,6 +144,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.agent_rss_history = {aid: [] for aid in self.possible_agents}
         self.total_energy_consumed_step = 0.0
         self.bs_radio_map = self.radio_model.generate_map((self.base_station.x, self.base_station.y), '5.8') if self.radio_model else None
+        # Debug: set to a {agent_id: planner} dict to draw MPPI rollouts
+        self.debug_planners = None
         # Pygame
         self.window = None
         self.clock = None
@@ -201,11 +203,11 @@ class LunarRoverMeshEnv(ParallelEnv):
             for i in range(max_retries):
                 candidate_x = agent_rng.uniform(0, self.width)
                 candidate_y = agent_rng.uniform(0, self.height)
-                
+
                 gx = agent_rng.uniform(0, self.width)
                 gy = agent_rng.uniform(0, self.height)
                 dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
-                
+
                 if dist > 50.0:
                     start_node = (int(candidate_x), int(candidate_y))
                     end_node = (int(gx), int(gy))
@@ -213,8 +215,7 @@ class LunarRoverMeshEnv(ParallelEnv):
                     if path:
                         agent.x, agent.y = candidate_x, candidate_y
                         agent.goal_x, agent.goal_y = gx, gy
-                        agent.nav_path = path 
-                        # print(i)
+                        agent.nav_path = path
                         break
                     else:
                         print(f"could not find valid path for radio_bias={self.radio_bias}, try: {i}")
@@ -769,7 +770,9 @@ class LunarRoverMeshEnv(ParallelEnv):
         bs_map_ax = fig.add_subplot(gs[0:4, 1]) # BS Map spans top 4 rows
 
         self.render_simulation(sim_ax)
-        
+        if self.debug_planners is not None:
+            self.render_rollouts(sim_ax, self.debug_planners)
+
         all_agent_paths = {
             aid: self.agent_map[aid].nav_path 
             for aid in self.possible_agents if aid in self.agent_map
@@ -873,6 +876,49 @@ class LunarRoverMeshEnv(ParallelEnv):
         ax.set_xlim([0, self.width])
         ax.set_ylim([0, self.height])
 
+    def render_rollouts(self, ax, planners, top_k=10):
+        """Draw MPPI rollout trajectories on the simulation axis.
+
+        Draws all sampled trajectories as faint lines, with the top-k
+        lowest-cost trajectories highlighted.
+        """
+        agent_colors = {
+            "rover_0": "blue", "rover_1": "purple", "rover_2": "green"
+        }
+
+        for agent_id, planner in planners.items():
+            if planner.last_rollout is None:
+                continue
+
+            positions = planner.last_rollout['positions']  # (N, H+1, 2)
+            costs = planner.last_rollout['costs']           # (N,)
+            N = positions.shape[0]
+            color = agent_colors.get(agent_id, 'gray')
+
+            # Draw all rollouts faintly
+            for i in range(N):
+                ax.plot(
+                    positions[i, :, 0], positions[i, :, 1],
+                    color=color, alpha=0.05, linewidth=0.5, zorder=1
+                )
+
+            # Highlight top-k lowest-cost trajectories
+            best_idx = np.argsort(costs)[:top_k]
+            for rank, i in enumerate(best_idx):
+                alpha = 0.8 if rank == 0 else 0.4
+                lw = 2.5 if rank == 0 else 1.5
+                ax.plot(
+                    positions[i, :, 0], positions[i, :, 1],
+                    color=color, alpha=alpha, linewidth=lw, zorder=4
+                )
+
+            # Mark the best trajectory endpoint
+            best = best_idx[0]
+            ax.scatter(
+                positions[best, -1, 0], positions[best, -1, 1],
+                s=60, color=color, marker='*', edgecolors='white',
+                linewidth=0.5, zorder=5
+            )
 
     def render_dashboard(self, ax):
         ax.axis('off')
