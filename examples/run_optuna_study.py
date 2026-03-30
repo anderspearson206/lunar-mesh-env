@@ -162,9 +162,9 @@ def make_objective(mode, seeds, sim_steps, num_agents, radio_model, hm_path):
     """Create an Optuna objective function closure."""
 
     def objective(trial):
-        w_comm = trial.suggest_float("w_comm", 0.0, 2.0)
-        w_bs = trial.suggest_float("w_bs", 0.0, 1.0)
-        w_goal = trial.suggest_float("w_goal", 0.5, 5.0)
+        w_comm = trial.suggest_float("w_comm", 0.0, 10.0)
+        w_bs = trial.suggest_float("w_bs", 0.0, 10.0)
+        w_goal = trial.suggest_float("w_goal", 0.5, 10.0)
         w_energy = trial.suggest_float("w_energy", 0.0, 1.0)
         bs_decay_rate = trial.suggest_float("bs_decay_rate", 0.3, 1.0)
 
@@ -249,7 +249,7 @@ def main():
                         default='both', help='Optimization objective')
     parser.add_argument('--n-trials', type=int, default=100, help='Number of Optuna trials')
     parser.add_argument('--n-seeds', type=int, default=3, help='Seeds per trial for averaging')
-    parser.add_argument('--sim-steps', type=int, default=300, help='Simulation steps per run')
+    parser.add_argument('--sim-steps', type=int, default=500, help='Simulation steps per run')
     parser.add_argument('--num-agents', type=int, default=1, help='Number of rovers')
     parser.add_argument('--study-name', default='mppi_weights', help='Optuna study name')
     parser.add_argument('--storage', default=None,
@@ -329,7 +329,8 @@ def main():
     print(f"  Est. time : ~{est_minutes:.0f} min\n")
 
     start = time.time()
-    study.optimize(objective_fn, n_trials=args.n_trials, show_progress_bar=True)
+    study.optimize(objective_fn, n_trials=args.n_trials, show_progress_bar=True,
+                   catch=(ValueError, FloatingPointError))
     elapsed = time.time() - start
 
     print(f"\nOptimization completed in {elapsed / 60:.1f} min")
@@ -338,3 +339,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# python run_optuna_study.py --objective goals --n-trials 100 --n-seeds 3 --num-agents 2 --study-name mppi_goals_2_agents \
+# ; python run_optuna_study.py --objective goals --n-trials 100 --n-seeds 3 --num-agents 3 --study-name mppi_goals_3_agents \
+# ; python run_optuna_study.py --objective throughput --n-trials 100 --n-seeds 3 --num-agents 1 --study-name mppi_throughput_1_agents \
+# ; python run_optuna_study.py --objective throughput --n-trials 100 --n-seeds 3 --num-agents 2 --study-name mppi_throughput_2_agents \
+# ; python run_optuna_study.py --objective throughput --n-trials 100 --n-seeds 3 --num-agents 3 --study-name mppi_throughput_3_agents \
+# ; python run_optuna_study.py --objective both --n-trials 100 --n-seeds 3 --num-agents 1 --study-name mppi_both_1_agents \
+# ; python run_optuna_study.py --objective both --n-trials 100 --n-seeds 3 --num-agents 2 --study-name mppi_both_2_agents \
+# ; python run_optuna_study.py --objective both --n-trials 100 --n-seeds 3 --num-agents 3 --study-name mppi_both_3_agents 
