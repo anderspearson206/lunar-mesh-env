@@ -99,16 +99,29 @@ def get_circular_heuristic_action(agent_id, env, step, radius=60, center=(128, 1
 
 
 def main():
-    DATA_ROOT = '../../NASA_DCGR_NETWORKING/radio_data_2/radio_data_2'
+    DATA_ROOT = '/home/paolo/Documents/lunar-mesh-env/DATA'
     # these paths will need to be changed based on where you store the data
     HM_PATH = f'{DATA_ROOT}/hm/hm_18.npy' 
     
+    # MODEL_PATHS = {
+    #     'k2_model': '../RadioLunaDiff/pretrained_models_network/k2unet/best_k2_model.pth',
+    #     'pmnet_model': '../RadioLunaDiff/pretrained_models_network/pmnet/best_pm_model.pt',
+    #     'diffusion_model': '../RadioLunaDiff/pretrained_models_network/diffusion'
+    # }
     MODEL_PATHS = {
-        'k2_model': '../RadioLunaDiff/pretrained_models_network/k2unet/best_k2_model.pth',
-        'pmnet_model': '../RadioLunaDiff/pretrained_models_network/pmnet/best_pm_model.pt',
-        'diffusion_model': '../RadioLunaDiff/pretrained_models_network/diffusion'
+        "k2_model": os.path.join(
+            os.path.dirname(__file__),
+            "RadioLunaDiff/pretrained_models_network/k2unet/best_k2_model.pth",
+        ),
+        "pmnet_model": os.path.join(
+            os.path.dirname(__file__),
+            "RadioLunaDiff/pretrained_models_network/pmnet/best_pm_model.pt",
+        ),
+        "diffusion_model": os.path.join(
+            os.path.dirname(__file__),
+            "RadioLunaDiff/pretrained_models_network/diffusion",
+        ),
     }
-    
     
     print("Loading models...")
     

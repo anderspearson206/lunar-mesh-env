@@ -15,9 +15,9 @@ from models.action_mask_model import TorchActionMaskModel
 
 ModelCatalog.register_custom_model("action_mask_model", TorchActionMaskModel)
 MODEL_PATHS = {
-        'k2_model': '/home/patorrad/Documents/lunar-mesh-env/RadioLunaDiff/pretrained_models_network/k2unet/best_k2_model.pth',
-        'pmnet_model': '/home/patorrad/Documents/lunar-mesh-env/RadioLunaDiff/pretrained_models_network/pmnet/best_pm_model.pt',
-        'diffusion_model': '/home/patorrad/Documents/lunar-mesh-env/RadioLunaDiff/pretrained_models_network/diffusion'
+        'k2_model': '/home/paolo/Documents/lunar-mesh-env/RadioLunaDiff/pretrained_models_network/k2unet/best_k2_model.pth',
+        'pmnet_model': '/home/paolo/Documents/lunar-mesh-env/RadioLunaDiff/pretrained_models_network/pmnet/best_pm_model.pt',
+        'diffusion_model': '/home/paolo/Documents/lunar-mesh-env/RadioLunaDiff/pretrained_models_network/diffusion'
     }
 
 def env_creator(config):

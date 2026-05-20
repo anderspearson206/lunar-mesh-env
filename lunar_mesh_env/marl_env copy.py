@@ -16,6 +16,7 @@ import random
 
 from .marl_entities import MarlMeshDTNAgent as MeshAgent, BaseStation
 from .radio_model_nn import RadioMapModelNN
+from .pathfinding import a_star_search_rm as a_star_search
 
 
 PACKET_SIZE_BITS = 10000000
@@ -30,12 +31,10 @@ def set_seed(seed=42):
 
 class LunarRoverMeshEnv(ParallelEnv):
     metadata = {
-        "render_modes": ["human", "rgb_array"],
+        "render_modes": ["human", "rgb_array"], 
         "name": "lunar_mesh_v1",
         "render_fps": 4
     }
-
-    HISTORY_LEN = 4   # number of past movement actions kept in observation
 
     def __init__(self, 
                  hm_path='../radio_data_2/radio_data_2/hm/hm_18.npy',
@@ -67,18 +66,11 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.STEP_LENGTH = 20
         self.METERS_PER_PIXEL = 1.0
         self.MAX_DIST_PER_STEP = (self.ROVER_SPEED * self.STEP_LENGTH) / self.METERS_PER_PIXEL
-
+        
         # restricts movement on steep inclines
-        self.MAX_INCLINE_PER_STEP = self.MAX_DIST_PER_STEP*0.25
-
-        # precomputed displacements for actions 1-8 (N S W E NE NW SE SW)
-        # all unit directions scaled by MAX_DIST_PER_STEP
-        _s = self.MAX_DIST_PER_STEP
-        _d = _s * 0.7071067811865476
-        self._move_dx = np.array([0., 0., -_s, _s,  _d, -_d,  _d, -_d])
-        self._move_dy = np.array([_s, -_s, 0., 0.,  _d,  _d, -_d, -_d])
-
-
+        self.MAX_INCLINE_PER_STEP = self.MAX_DIST_PER_STEP*100 #*0.25
+        
+        
         # Energy & Rewards
         self.START_ENERGY = 5000000.0
         self.COST_MOVE_PER_STEP = 5.0
@@ -88,25 +80,22 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.EP_MAX_TIME = 20000
         self.MIN_DBM_THRESHOLD = -82.0 # look at get_throughput_rss() in radio_model_nn.py
         # Reward Config
-        self.REWARD_PEER_LINK = 1.0 #Not used
+        self.REWARD_PEER_LINK = 1.0
         self.REWARD_BS_LINK = 5.0 
         self.TELEMETRY_RATE_MBPS = data_rate_mbps
         # The rovers know how to reach the goal (preset path)
         # but since we allow them to leave the path for comms, 
         # we need to reward them for arriving.
-        self.REWARD_GOAL_ARRIVAL = 100.0
-        self.REWARD_DIST_SCALE = 2.0
+        self.REWARD_GOAL_ARRIVAL = 100.0 
+        self.REWARD_DIST_SCALE = 2.0      
         self.PENALTY_FAIL = -0.1
-        self.PENALTY_INVALID_MOVE = -1.0
-        # Coverage reward: agents earn this per newly illuminated pixel (signal >= threshold).
-        # The coverage map starts from the BS radio map so only rover-added coverage counts.
-        self.REWARD_COVERAGE_PER_PIXEL = 0. # 0.001
+        self.PENALTY_INVALID_MOVE = -1.0 
 
 
         # DTN config
         self.PACKET_GEN_PROB = 0.5
-        self.REWARD_PACKET_DELIVERY = .0
-        self.PENALTY_BUFFER_OVERFLOW = 0 #-5.0
+        self.REWARD_PACKET_DELIVERY = 10.0 
+        self.PENALTY_BUFFER_OVERFLOW = -5.0
         
 
         self.base_station = BaseStation(x=0.0, y=0.0)
@@ -199,17 +188,11 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.base_station.y = new_bs_y
 
         self.bs_radio_map = self.radio_model.generate_map((self.base_station.x, self.base_station.y), '5.8')
-
-        # Coverage map: running max of dBm seen at each pixel from any agent radio map.
-        # Seeded with BS coverage so rovers are only rewarded for extending beyond the BS.
-        self.coverage_map = self.bs_radio_map.copy() if self.bs_radio_map is not None \
-            else np.full((self.height, self.width), -np.inf, dtype=np.float32)
-
-        # move-history buffers (one per agent, length = HISTORY_LEN)
-        self._move_history = {
-            a: np.zeros(self.HISTORY_LEN, dtype=np.float32) for a in self.agents
-        }
-
+            
+        safety_factor = 0.9
+        per_pixel_threshold = (self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)) * safety_factor
+        
+        
         # reset agent states
         for i, agent_id in enumerate(self.agents):
             agent = self.agent_map[agent_id]
@@ -217,19 +200,28 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent.total_distance = 0.0
             agent.active_route = None
             agent.current_datarate = 0.0
-            agent.nav_path = []
-            agent_rng = np.random.RandomState(self.seed + i)
+            agent_rng = rng = np.random.RandomState(self.seed+i)
             max_retries = 100
-            for _ in range(max_retries):
+            for i in range(max_retries):
                 candidate_x = agent_rng.uniform(0, self.width)
                 candidate_y = agent_rng.uniform(0, self.height)
+                
                 gx = agent_rng.uniform(0, self.width)
                 gy = agent_rng.uniform(0, self.height)
-                dist = np.sqrt((gx - candidate_x)**2 + (gy - candidate_y)**2)
+                dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
+                
                 if dist > 50.0:
-                    agent.x, agent.y = candidate_x, candidate_y
-                    agent.goal_x, agent.goal_y = gx, gy
-                    break
+                    start_node = (int(candidate_x), int(candidate_y))
+                    end_node = (int(gx), int(gy))
+                    path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold, self.radio_bias)
+                    if path:
+                        agent.x, agent.y = candidate_x, candidate_y
+                        agent.goal_x, agent.goal_y = gx, gy
+                        agent.nav_path = path 
+                        # print(i)
+                        break
+                    else:
+                        print(f"could not find valid path for radio_bias={self.radio_bias}, try: {i}")
                     
         # initial radio cache update
         self.radio_model.generate_map_batch([(self.agent_map[a].x, self.agent_map[a].y) for a in self.agents], '5.8')
@@ -275,8 +267,6 @@ class LunarRoverMeshEnv(ParallelEnv):
         # global rm update to leverage batch processing
         agent_positions = [(a.x, a.y) for a in self.agent_map.values()]
         self.radio_model.generate_map_batch(agent_positions, '5.8')
-
-        self._compute_coverage_reward(rewards)
 
         for agent_id, agent in self.agent_map.items():
             if agent.energy <= 0: continue
@@ -339,13 +329,6 @@ class LunarRoverMeshEnv(ParallelEnv):
             "goals_reached": self.agent_goals_completed[agent_id]
         })
         
-        # record movement actions taken this step into per-agent history
-        for agent_id in active_this_step:
-            move_cmd = float(actions[agent_id][0])
-            hist = self._move_history[agent_id]
-            hist[:-1] = hist[1:]
-            hist[-1]  = move_cmd
-
         observations = {a: self._get_obs(a) for a in active_this_step}
         
         # Filter dead agents from the loop
@@ -353,22 +336,6 @@ class LunarRoverMeshEnv(ParallelEnv):
         return observations, rewards, terminations, truncations, infos
 
 
-
-    def _compute_coverage_reward(self, rewards):
-        """Reward agents for each newly illuminated pixel above the connectivity threshold."""
-        if not rewards:
-            return
-        prev_covered = int((self.coverage_map >= self.MIN_DBM_THRESHOLD).sum())
-        for agent in self.agent_map.values():
-            rm = self.radio_model.generate_map((agent.x, agent.y), '5.8')
-            if rm is not None:
-                np.maximum(self.coverage_map, rm, out=self.coverage_map)
-        new_covered = int((self.coverage_map >= self.MIN_DBM_THRESHOLD).sum())
-        delta = new_covered - prev_covered
-        if delta > 0:
-            per_agent = delta * self.REWARD_COVERAGE_PER_PIXEL / len(rewards)
-            for aid in rewards:
-                rewards[aid] += per_agent
 
     def _handle_communication_step(self, actions, rewards, infos):
         
@@ -528,7 +495,11 @@ class LunarRoverMeshEnv(ParallelEnv):
             dist_delta = prev_dist - curr_dist 
             rewards[agent_id] += dist_delta * self.REWARD_DIST_SCALE
             
-            if curr_dist < (self.MAX_DIST_PER_STEP*4.0) and not self.mission_done[agent_id]:
+            safety_factor = 0.9
+            per_pixel_threshold = (self.MAX_INCLINE_PER_STEP / max(1.0, self.MAX_DIST_PER_STEP)) * safety_factor
+
+
+            if curr_dist < (self.MAX_DIST_PER_STEP*1.5) and not self.mission_done[agent_id]: 
                 rewards[agent_id] += self.REWARD_GOAL_ARRIVAL
                 infos[agent_id]['task_complete'] = True
                 self.agent_goals_completed[agent_id] += 1
@@ -538,16 +509,25 @@ class LunarRoverMeshEnv(ParallelEnv):
                     agent.nav_path = [] 
                     agent.goal_x, agent.goal_y = agent.x, agent.y 
                 else:
-                    rng = np.random.RandomState(self.seed + self.agent_goals_completed[agent_id] + int(agent_id[-1]) * self.num_goals * 2)
-                    for _ in range(100):
+                    max_retries = 100
+                    rng = np.random.RandomState(self.seed + self.agent_goals_completed[agent_id]+int(agent_id[-1])*self.num_goals*2)
+                    for i in range(max_retries):
                         gx = rng.uniform(0, self.width)
                         gy = rng.uniform(0, self.height)
                         dist = np.sqrt((gx - agent.x)**2 + (gy - agent.y)**2)
+                        
                         if dist > 25.0:
-                            agent.goal_x = gx
-                            agent.goal_y = gy
-                            agent.nav_path = []
-                            break
+                            start_node = (int(agent.x), int(agent.y))
+                            end_node = (int(gx), int(gy))
+                            path = a_star_search(self.heightmap, self.bs_radio_map, start_node, end_node, per_pixel_threshold, self.radio_bias)
+                            if path:
+                                agent.goal_x = gx
+                                agent.goal_y = gy
+                                agent.nav_path = path
+                                # print(i)
+                                break
+                            else:
+                                print(f"could not find valid path for radio_bias={self.radio_bias}, try: {i}")
             else:
                 infos[agent_id]['task_complete'] = False
                 
@@ -663,18 +643,6 @@ class LunarRoverMeshEnv(ParallelEnv):
     
     
 
-    def _compute_move_mask(self, agent) -> np.ndarray:
-        """Vectorized validity check for all 8 movement actions at once."""
-        new_x = np.clip(agent.x + self._move_dx, 0, self.width  - 1)
-        new_y = np.clip(agent.y + self._move_dy, 0, self.height - 1)
-        moved = (new_x != agent.x) | (new_y != agent.y)
-        curr_z   = self.heightmap[int(agent.y), int(agent.x)]
-        target_z = self.heightmap[new_y.astype(int), new_x.astype(int)]
-        slope_ok = (target_z - curr_z) <= self.MAX_INCLINE_PER_STEP
-        mask = np.ones(9, dtype=np.int8)
-        mask[1:] = (moved & slope_ok).astype(np.int8)
-        return mask
-
     def _get_obs(self, agent_id):
         agent = self.agent_map[agent_id]
         all_agents = list(self.agent_map.values())
@@ -685,7 +653,11 @@ class LunarRoverMeshEnv(ParallelEnv):
         # build action mask
         num_rovers = len(self.possible_agents)
         # 9 movement actions + (num_rovers peer targets + 1 BS target)
-        move_mask = self._compute_move_mask(agent)
+        move_mask = np.zeros(9, dtype=np.int8)
+        move_mask[0] = 1  # idle is always allowed
+        for move_cmd in range(1, 9):
+            if self._is_move_valid(agent, move_cmd):
+                move_mask[move_cmd] = 1
 
 
         comm_masks = []
@@ -709,26 +681,27 @@ class LunarRoverMeshEnv(ParallelEnv):
         # flatten the mask for rllib
         action_mask = np.concatenate([move_mask, np.array(comm_masks).flatten()]).astype(np.int8)
 
-        # scale move_history [0..8] → [0..256] so both flat (/256) and dict (_NORM=256) paths agree
-        move_history = self._move_history[agent_id] * (256.0 / 8.0)
-
         # final dictionary assembly
         final_obs = {
             # -- disabled (kept for future use) --
             # "energy": np.clip(np.array([obs_dict["energy"]], dtype=np.float32), 0.0, 5_000_000.0),
             # "buffer_usage": np.clip(obs_dict["buffer_usage"].astype(np.float32), 0.0, 1.0),
             # ------------------------------------
-            "position":     np.clip(obs_dict["position"],    0.0,    256.0),
-            "goal_vector":  np.clip(obs_dict["goal_vector"], -256.0, 256.0),
-            "move_history": move_history,
-            # "num_packets": np.clip(obs_dict["num_packets"].astype(np.float32), 0.0, 1000.0),
-            # "other_agent_vectors": np.clip(obs_dict["other_agent_vectors"].astype(np.float32), -256.0, 256.0),
-            # "other_agent_connectivity": np.clip(obs_dict["other_agent_connectivity"].astype(np.float32), 0.0, 1.0),
-            "terrain":      obs_dict["terrain"],
-            "radio_map":    np.clip(obs_dict["radio_map"],   -200.0, 0.0),
-            "action_mask":  action_mask,
+            "position": np.clip(obs_dict["position"].astype(np.float32), 0.0, 256.0),
+            "goal_vector": np.clip(obs_dict["goal_vector"].astype(np.float32), -256.0, 256.0),
+            "num_packets": np.clip(obs_dict["num_packets"].astype(np.float32), 0.0, 1000.0),
+            "other_agent_vectors": np.clip(obs_dict["other_agent_vectors"].astype(np.float32), -256.0, 256.0),
+            "other_agent_connectivity": np.clip(obs_dict["other_agent_connectivity"].astype(np.float32), 0.0, 1.0),
+            "terrain": obs_dict["terrain"].astype(np.float32),
+            "radio_map": np.clip(obs_dict["radio_map"].astype(np.float32), -200.0, 0.0),
+            "action_mask": action_mask
         }
 
+        # Safety check for non-finite values
+        for key, val in final_obs.items():
+            if not np.all(np.isfinite(val)):
+                final_obs[key] = np.nan_to_num(val, nan=0.0, posinf=0.0, neginf=0.0)
+        
         return final_obs
     
     @functools.lru_cache(maxsize=None)
@@ -745,12 +718,11 @@ class LunarRoverMeshEnv(ParallelEnv):
             # "energy": spaces.Box(low=0, high=self.START_ENERGY, shape=(1,), dtype=np.float32),
             # "buffer_usage": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             # ------------------------------------
-            "position":     spaces.Box(low=0,    high=256, shape=(2,),              dtype=np.float32),
-            "goal_vector":  spaces.Box(low=-256, high=256, shape=(2,),              dtype=np.float32),
-            "move_history": spaces.Box(low=0,    high=256, shape=(self.HISTORY_LEN,), dtype=np.float32),
-            # "num_packets": spaces.Box(low=0, high=1000, shape=(1,), dtype=np.float32),
-            # "other_agent_vectors": spaces.Box(low=-256, high=256, shape=(num_rovers + 1, 2), dtype=np.float32),
-            # "other_agent_connectivity": spaces.Box(low=0, high=1, shape=(num_rovers + 1,), dtype=np.float32),
+            "position": spaces.Box(low=0, high=256, shape=(2,), dtype=np.float32),
+            "goal_vector": spaces.Box(low=-256, high=256, shape=(2,), dtype=np.float32),
+            "num_packets": spaces.Box(low=0, high=1000, shape=(1,), dtype=np.float32),
+            "other_agent_vectors": spaces.Box(low=-256, high=256, shape=(num_rovers + 1, 2), dtype=np.float32),
+            "other_agent_connectivity": spaces.Box(low=0, high=1, shape=(num_rovers + 1,), dtype=np.float32),
             "terrain": spaces.Box(low=0, high=500, shape=(1, 256, 256), dtype=np.float32),
             "radio_map": spaces.Box(low=-200, high=0, shape=(1, 256, 256), dtype=np.float32),
             "action_mask": spaces.Box(low=0, high=1, shape=(mask_dim,), dtype=np.int8)

@@ -3,6 +3,11 @@
 *.mp4
 
 *.npy
+*.db
+*.png
+*.gz
+
+DATA/ 
 
 .venv/
 

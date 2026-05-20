@@ -49,7 +49,8 @@ class RadioMapModelNN:
         
         self.dummy_mode = dummy_mode
         if dummy_mode:
-            print("WARNING: RadioMapModelNN running in DUMMY MODE. No real inference will be performed.")
+            if type(self) is RadioMapModelNN:
+                print("WARNING: RadioMapModelNN running in DUMMY MODE. No real inference will be performed.")
             return
 
         try:

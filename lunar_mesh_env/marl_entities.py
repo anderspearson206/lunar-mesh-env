@@ -92,8 +92,9 @@ class MarlMeshDTNAgent(MarlAgent):
         self.heightmap = heightmap
         if heightmap is None:
             heightmap = np.zeros((2, 256), dtype=np.float32)
-            
-            
+        _t = heightmap.astype(np.float32)
+        self._terrain_obs = _t[np.newaxis] if _t.ndim == 2 else _t
+
         if radio_model is None:
             raise ValueError("MarlMeshAgent requires a RadioMapModelNN instance.")
         self.radio_model = radio_model
@@ -275,6 +276,7 @@ class MarlMeshDTNAgent(MarlAgent):
 
         # radio map
         radio_map = self.radio_model.generate_map((self.x, self.y), frequency='5.8')
+        
         if radio_map is None:
             rm_obs = np.zeros_like(terrain_obs)
         else:
@@ -506,19 +508,13 @@ class MarlMeshAgent(MarlAgent):
         
         
         
-        terrain_obs = self.heightmap.astype(np.float32)
-        if len(terrain_obs.shape) == 2:
-            terrain_obs = np.expand_dims(terrain_obs, axis=0)
+        terrain_obs = self._terrain_obs  # pre-computed at init, never changes
 
-        # rm 
         radio_map = self.radio_model.generate_map((self.x, self.y), frequency='5.8')
         if radio_map is None:
-            # Assuming square map matching terrain size
             rm_obs = np.zeros_like(terrain_obs)
         else:
-            rm_obs = radio_map.astype(np.float32)
-            if len(rm_obs.shape) == 2:
-                rm_obs = np.expand_dims(rm_obs, axis=0)
+            rm_obs = radio_map[np.newaxis] if radio_map.ndim == 2 else radio_map
 
         # get neighbor relative positions
         neighbor_features = []
