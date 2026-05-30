@@ -57,8 +57,8 @@ MODEL_PATHS = {
 
 RAY_RESULTS_DIR = os.path.expanduser("~/ray_results")
 NUM_AGENTS      = 3
-MAX_STEPS       = 500
-DEFAULT_DB      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_metrics_real_maps_2.db")
+MAX_STEPS       = 250
+DEFAULT_DB      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_metrics_real_maps_3.db")
 
 
 # ---------------------------------------------------------------------------

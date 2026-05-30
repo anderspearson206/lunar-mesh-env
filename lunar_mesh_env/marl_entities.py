@@ -510,7 +510,11 @@ class MarlMeshAgent(MarlAgent):
         
         terrain_obs = self._terrain_obs  # pre-computed at init, never changes
 
-        radio_map = self.radio_model.generate_map((self.x, self.y), frequency='5.8')
+        # Use radio map cached by _compute_coverage_reward this step to avoid
+        # a second cold mmap read for the same position.
+        radio_map = getattr(self, '_cached_radio_map', None)
+        if radio_map is None:
+            radio_map = self.radio_model.generate_map((self.x, self.y), frequency='5.8')
         if radio_map is None:
             rm_obs = np.zeros_like(terrain_obs)
         else:

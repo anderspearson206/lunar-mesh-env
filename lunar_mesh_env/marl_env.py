@@ -100,12 +100,12 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.PENALTY_INVALID_MOVE = -1.0
         # Coverage reward: agents earn this per newly illuminated pixel (signal >= threshold).
         # The coverage map starts from the BS radio map so only rover-added coverage counts.
-        self.REWARD_COVERAGE_PER_PIXEL = 0. # 0.001
+        self.REWARD_COVERAGE_PER_PIXEL = 0.001
 
 
         # DTN config
         self.PACKET_GEN_PROB = 0.5
-        self.REWARD_PACKET_DELIVERY = .0
+        self.REWARD_PACKET_DELIVERY = 0.0
         self.PENALTY_BUFFER_OVERFLOW = 0 #-5.0
         
 
@@ -148,7 +148,6 @@ class LunarRoverMeshEnv(ParallelEnv):
         }
         
         # Cache & History
-  
         self.connections = defaultdict(set)
         self.custom_links = {} 
         self.all_visible_links = []
@@ -182,6 +181,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         return self.base_station.num_packets_received
     
     def reset(self, seed=None, options=None):
+        self.radio_model.clear_cache()
         self.agents = self.possible_agents[:]
         self.sim_time = 0
         self.connections = defaultdict(set)
@@ -217,6 +217,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             agent.total_distance = 0.0
             agent.active_route = None
             agent.current_datarate = 0.0
+            agent._cached_radio_map = None
             agent.nav_path = []
             agent_rng = np.random.RandomState(self.seed + i)
             max_retries = 100
@@ -246,12 +247,15 @@ class LunarRoverMeshEnv(ParallelEnv):
         return observations, infos
 
     def step(self, actions):
-        
+        # Drop cached radio maps from the previous step to prevent unbounded
+        # memory growth (each unique position caches a 256 KB float32 array).
+        self.radio_model.clear_cache()
+
         rewards = {a: 0 for a in self.agents}
         terminations = {a: False for a in self.agents}
         truncations = {a: False for a in self.agents}
         infos = {a: {} for a in self.agents}
-        
+
         self.total_energy_consumed_step = 0.0
         self.sim_time += 1
         
@@ -269,31 +273,11 @@ class LunarRoverMeshEnv(ParallelEnv):
         
         self._handle_movement_step(actions, rewards, infos)
 
-        # after movement and comms actions have been done, update
-        # comms info
-        
-        # global rm update to leverage batch processing
-        agent_positions = [(a.x, a.y) for a in self.agent_map.values()]
-        self.radio_model.generate_map_batch(agent_positions, '5.8')
-
         self._compute_coverage_reward(rewards)
 
-        for agent_id, agent in self.agent_map.items():
-            if agent.energy <= 0: continue
-            
-            # Update connectivity for the new positions
-            agent.update_neighbors(list(self.agent_map.values()), self.width, self.height)
-            agent.update_bs_connection(self.radio_model, self.width, self.height)
+        # Batch update connectivity + RSS with a single vectorized map lookup
+        bs_rssi_per_agent = self._update_connectivity_batch()
 
-            # populate visible links for rendering
-            if agent.bs_connected:
-                self.all_visible_links.append((agent, self.base_station))
-            
-            for neighbor in agent.neighbors:
-                if agent.ue_id < neighbor.ue_id:
-                    self.all_visible_links.append((agent, neighbor))
-
-        
         # metrics and cleanup
         global_truncate = self.sim_time >= self.EP_MAX_TIME
 
@@ -301,29 +285,21 @@ class LunarRoverMeshEnv(ParallelEnv):
         avg_datarate = np.mean(active_datarates) if active_datarates else 0.0
         self.history['datarate'].append(avg_datarate)
         self.history['energy'].append(self.total_energy_consumed_step)
-        
-        # calculate BS link ratio
-        total_possible_links = len(self.agents)
-        if total_possible_links > 0:
-            bs_links = sum(1 for a_id in self.agents if self.base_station in self.connections[self.agent_map[a_id]])
-            link_ratio = bs_links / total_possible_links
-        else:
-            link_ratio = 0.0
+
+        # BS link ratio
+        bs_links = sum(1 for a in self.agent_map.values() if a.bs_connected)
+        link_ratio = bs_links / len(self.agents) if self.agents else 0.0
         self.history['bs_link_ratio'].append(link_ratio)
-        
-        # calculate RSS stats
+
+        # RSS history — reuse the values already computed in _update_connectivity_batch
         current_step_rss = []
-        for aid in self.possible_agents:
+        for i, aid in enumerate(self.possible_agents):
             agent = self.agent_map[aid]
             if agent.energy > 0:
-                rssi_from_bs = self.radio_model.get_signal_strength(*self.base_station.get_position(), agent.x, agent.y)
-                self.agent_rss_history[aid].append(rssi_from_bs)
-                current_step_rss.append(rssi_from_bs)
-            
-        if current_step_rss:
-            self.history["avg_rss"].append(np.mean(current_step_rss))
-        else:
-            self.history["avg_rss"].append(-150.0)
+                rssi = float(bs_rssi_per_agent[i])
+                self.agent_rss_history[aid].append(rssi)
+                current_step_rss.append(rssi)
+        self.history["avg_rss"].append(np.mean(current_step_rss) if current_step_rss else -150.0)
             
         # final termination checks
         active_this_step = list(actions.keys())
@@ -354,6 +330,49 @@ class LunarRoverMeshEnv(ParallelEnv):
 
 
 
+    def _update_connectivity_batch(self) -> np.ndarray:
+        """
+        Update agent.neighbors and agent.bs_connected for all agents in one
+        vectorized mmap lookup instead of N² individual get_signal_strength calls.
+
+        Returns bs_rssi_per_agent (shape: num_possible_agents) so the caller can
+        reuse the values for the RSS history without a second lookup round.
+        """
+        agents = [self.agent_map[a] for a in self.possible_agents]
+        n = len(agents)
+
+        ax = np.clip(np.round([a.x for a in agents]), 0, self.width  - 1).astype(int)
+        ay = np.clip(np.round([a.y for a in agents]), 0, self.height - 1).astype(int)
+        bx = int(round(float(np.clip(self.base_station.x, 0, self.width  - 1))))
+        by = int(round(float(np.clip(self.base_station.y, 0, self.height - 1))))
+
+        # conn[i, j] = RSSI at agent i from TX at agent j  (N×N batch lookup)
+        conn    = self.radio_model.maps[ay[np.newaxis, :], ax[np.newaxis, :],
+                                        ay[:, np.newaxis], ax[:, np.newaxis]].astype(np.float32)
+        # bs_rssi[i] = RSSI at BS from TX at agent i
+        bs_rssi = self.radio_model.maps[ay, ax, by, bx].astype(np.float32)
+
+        connected = conn    > self.MIN_DBM_THRESHOLD   # (n, n) bool
+        bs_conn   = bs_rssi > self.MIN_DBM_THRESHOLD   # (n,)   bool
+
+        self.all_visible_links = []
+        for i, agent in enumerate(agents):
+            if agent.energy <= 0:
+                agent.neighbors  = set()
+                agent.bs_connected = False
+                continue
+
+            agent.bs_connected = bool(bs_conn[i])
+            agent.neighbors    = {agents[j] for j in range(n) if connected[i, j] and j != i}
+
+            if agent.bs_connected:
+                self.all_visible_links.append((agent, self.base_station))
+            for neighbor in agent.neighbors:
+                if agent.ue_id < neighbor.ue_id:
+                    self.all_visible_links.append((agent, neighbor))
+
+        return bs_rssi
+
     def _compute_coverage_reward(self, rewards):
         """Reward agents for each newly illuminated pixel above the connectivity threshold."""
         if not rewards:
@@ -362,6 +381,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         for agent in self.agent_map.values():
             rm = self.radio_model.generate_map((agent.x, agent.y), '5.8')
             if rm is not None:
+                agent._cached_radio_map = rm          # reused by _get_obs — avoids second mmap read
                 np.maximum(self.coverage_map, rm, out=self.coverage_map)
         new_covered = int((self.coverage_map >= self.MIN_DBM_THRESHOLD).sum())
         delta = new_covered - prev_covered

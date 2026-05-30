@@ -3,6 +3,8 @@
 Get to goal only
 /home/paolo/ray_results/lunar_mesh_ppo/PPO_lunar_mesh_v1_ce859_00000_0_2026-04-03_08-07-18/checkpoint_000009
 
+
+
 Both
 self.REWARD_PACKET_DELIVERY = 20.0 
 /home/paolo/ray_results/lunar_mesh_ppo/PPO_lunar_mesh_v1_f53ce_00000_0_2026-04-04_06-55-37/checkpoint_000009
@@ -15,17 +17,33 @@ self.REWARD_PACKET_DELIVERY = 10.0
 
 Get to goal only
 <!-- /home/paolo/ray_results/lunar_mesh_ppo/PPO_lunar_mesh_v1_e5f0c_00000_0_2026-04-17_12-16-12/checkpoint_000009 -->
-/home/paolo/ray_results/lookup_3agents_goal/PPO_lunar_mesh_lookup_v1_4f3e1_00000_0_2026-05-10_09-57-20/checkpoint_000009
+<!-- /home/paolo/ray_results/lookup_3agents_goal/PPO_lunar_mesh_lookup_v1_4f3e1_00000_0_2026-05-10_09-57-20/checkpoint_000009
+/home/paolo/ray_results/spedup_3agents_goal/PPO_lunar_mesh_lookup_v1_4ca59_00000_0_2026-05-21_06-02-19/checkpoint_000001 -->
+~/ray_results/lookup_3agents_goal_nocovrew/PPO_lunar_mesh_lookup_v1_f6ccc_00000_0_2026-05-25_08-18-20/checkpoint_000000
 
 Goal + Ill
-/home/paolo/ray_results/lookup_3agents_goal+illum/PPO_lunar_mesh_lookup_v1_75fb6_00000_0_2026-05-19_13-58-17/checkpoint_000009
+<!-- /home/paolo/ray_results/lookup_3agents_goal+illum/PPO_lunar_mesh_lookup_v1_75fb6_00000_0_2026-05-19_13-58-17/checkpoint_000009 -->
+<!-- /home/paolo/ray_results/spedup_3agents_goal_ill/PPO_lunar_mesh_lookup_v1_d8e4c_00000_0_2026-05-21_08-07-56/checkpoint_000001 -->
+/home/paolo/ray_results/lookup_3agents_goal/PPO_lunar_mesh_lookup_v1_7058c_00000_0_2026-05-24_08-44-24/checkpoint_000000
+
+with reward 0.005
+/home/paolo/ray_results/spedup_3agents_goal+ill005/PPO_lunar_mesh_lookup_v1_b7d94_00000_0_2026-05-27_17-11-05/checkpoint_000000
+
+with reward 0.002
+/home/paolo/ray_results/spedup_3agents_goal+ill002/PPO_lunar_mesh_lookup_v1_95029_00000_0_2026-05-28_12-29-45/checkpoint_000000
+
+with reward 0.0005
+/home/paolo/ray_results/spedup_3agents_goal+ill0005/PPO_lunar_mesh_lookup_v1_5a9d2_00000_0_2026-05-28_13-18-13/checkpoint_000000
+
 
 Both
 self.REWARD_PACKET_DELIVERY = 20.0 
 <!-- /home/paolo/ray_results/lunar_mesh_ppo_lookup/PPO_lunar_mesh_lookup_v1_67ee7_00000_0_2026-04-23_09-28-05/checkpoint_000009 -->
-/home/paolo/ray_results/lookup_3agents_goal+comms20/PPO_lunar_mesh_lookup_v1_8b338_00000_0_2026-05-10_16-11-15/checkpoint_000009
+<!-- /home/paolo/ray_results/lookup_3agents_goal+comms20/PPO_lunar_mesh_lookup_v1_8b338_00000_0_2026-05-10_16-11-15/checkpoint_000009 -->
+/home/paolo/ray_results/lookup_3agents_goal+comm/PPO_lunar_mesh_lookup_v1_a1122_00000_0_2026-05-26_13-08-15/checkpoint_000000
 
 Both
+
 self.REWARD_PACKET_DELIVERY = 10.0 
 <!-- /home/paolo/ray_results/lunar_mesh_ppo_lookup/PPO_lunar_mesh_lookup_v1_e037c_00000_0_2026-04-24_09-51-44/checkpoint_000009 -->
 /home/paolo/ray_results/lookup_3agents_goal+comms10/PPO_lunar_mesh_lookup_v1_aa74c_00000_0_2026-05-10_20-44-08/checkpoint_000009

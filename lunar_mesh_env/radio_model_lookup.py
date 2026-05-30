@@ -31,7 +31,8 @@ class RadioMapModelLookup(RadioMapModelNN):
                  maps_path: str,
                  heightmap: np.ndarray,
                  env_width: float = 256,
-                 env_height: float = 256):
+                 env_height: float = 256,
+                 maps_array: np.ndarray = None):
         super().__init__(
             model_paths={},
             heightmap=heightmap,
@@ -41,7 +42,7 @@ class RadioMapModelLookup(RadioMapModelNN):
         )
         self.dummy_mode = False
         self.maps_path  = maps_path
-        self._maps      = None
+        self._maps      = maps_array   # None → lazy mmap load; set → shared plasma array
         self._map_cache: dict = {}   # (tx_y, tx_x) → float32 array, cleared each step
 
     # ------------------------------------------------------------------

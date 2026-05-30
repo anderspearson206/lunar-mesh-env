@@ -48,8 +48,8 @@ MAPS_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 NUM_AGENTS       = 3
 TRAIN_BATCH_SIZE = 4000
 LR               = 5e-5
-NUM_ENV_RUNNERS  = 4        # lookup is fast enough to use multiple workers
-TOTAL_ITERATIONS = 100
+NUM_ENV_RUNNERS  = 6         # limited by RAM: each worker mmaps the 8 GB radio map
+TOTAL_ITERATIONS = 50
 CHECKPOINT_FREQ  = 50
 EXPERIMENT_NAME  = "lunar_mesh_ppo_lookup"
 WANDB_PROJECT    = "lunar-mesh-rl"
@@ -59,8 +59,8 @@ WANDB_PROJECT    = "lunar-mesh-rl"
 # ---------------------------------------------------------------------------
 
 def env_creator(config):
-    hm         = np.load(config.get("hm_path", HM_PATH))
-    maps_path  = config.get("maps_path", MAPS_PATH)
+    hm        = np.load(config.get("hm_path", HM_PATH))
+    maps_path = config.get("maps_path", MAPS_PATH)
     radio_model = RadioMapModelLookup(
         maps_path=maps_path,
         heightmap=hm,
@@ -73,7 +73,7 @@ def env_creator(config):
         num_agents=config.get("num_agents", NUM_AGENTS),
         seed=19,
     )
-    raw_env.EP_MAX_TIME = config.get("max_episode_steps", 500)
+    raw_env.EP_MAX_TIME = config.get("max_episode_steps", 250)
 
     env = ParallelPettingZooEnv(raw_env)
     env.observation_space = raw_env.observation_spaces[raw_env.possible_agents[0]]
@@ -124,7 +124,7 @@ def build_config(obs_space, act_space, maps_path: str):
                 "num_agents":        NUM_AGENTS,
                 "hm_path":           HM_PATH,
                 "maps_path":         maps_path,
-                "max_episode_steps": 100,
+                "max_episode_steps": 250,
             },
         )
         .framework("torch")
@@ -153,8 +153,8 @@ def build_config(obs_space, act_space, maps_path: str):
         )
         .env_runners(
             num_env_runners=NUM_ENV_RUNNERS,
-            num_gpus_per_env_runner=0,   # no GPU needed: lookup is pure numpy
-            rollout_fragment_length=200,
+            num_gpus_per_env_runner=0,
+            rollout_fragment_length="auto",
             sample_timeout_s=120,        # lookup is fast; 120 s is generous
         )
         .resources(num_gpus=0)
@@ -194,9 +194,19 @@ if __name__ == "__main__":
     probe_env.close()
 
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ray_temp  = os.path.expanduser("~/ray_temp")
+    os.makedirs(ray_temp, exist_ok=True)
     ray.init(
         ignore_reinit_error=True,
         runtime_env={"env_vars": {"PYTHONPATH": repo_root}},
+        # Use /home instead of /tmp for Ray's session dir and object spill.
+        # The root partition (/) is nearly full; /home has 137 GB free.
+        _temp_dir=ray_temp,
+        # Ray's OOM monitor sums RSS across processes, which double-counts
+        # shared mmap pages (the 8 GB radio-map file is shared in the OS
+        # page cache but appears in each worker's RSS). Raise the threshold
+        # to avoid false kills; the OS OOM killer is the real safety net.
+        _system_config={"memory_usage_threshold": 0.99},
     )
 
     config = build_config(obs_space, act_space, args.maps)
