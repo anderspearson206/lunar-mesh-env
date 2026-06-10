@@ -2,7 +2,7 @@
 *.gif
 *.mp4
 
-*.npy
+
 
 .venv/
 
