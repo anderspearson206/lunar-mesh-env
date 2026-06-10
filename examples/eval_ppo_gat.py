@@ -1,18 +1,20 @@
 """
-Load the latest PPO checkpoint and run a visual evaluation episode.
+Load a GAT-MARL PPO checkpoint and run an evaluation episode.
 
 Usage
 -----
-    # Auto-detect latest checkpoint
-    python examples/eval_ppo_checkpoint.py
+    # Auto-detect latest checkpoint under ~/ray_results
+    python examples/eval_ppo_gat.py
 
-    # Point to a specific checkpoint directory
-    python examples/eval_ppo_checkpoint.py --checkpoint /path/to/checkpoint_dir
+    # Specific checkpoint
+    python examples/eval_ppo_gat.py --checkpoint /path/to/checkpoint_dir
 
-    # Custom output stem and database path
-    python examples/eval_ppo_checkpoint.py --out run1 --db results/eval.db
+    # Custom output stem, DB, and run label
+    python examples/eval_ppo_gat.py --out run1 --db results/eval_gat.db --name gat_v1
 
-Output: <out>.gif in the current directory, metrics written to SQLite <db>.
+Output: <out>.gif, metrics written to SQLite <db>.
+The DB schema is identical to eval_ppo_checkpoint.py so both can be
+compared in the same plotting script.
 """
 
 import os
@@ -23,9 +25,6 @@ import sqlite3
 import datetime
 
 import numpy as np
-import torch
-import imageio
-
 import ray
 from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.models import ModelCatalog
@@ -36,64 +35,54 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from lunar_mesh_env import LunarRoverMeshEnv, RadioMapModelNN
 from lunar_mesh_env.radio_model_lookup import RadioMapModelLookup
-from models.action_mask_model import TorchActionMaskModel
+from lunar_mesh_env.marl_env_gat import LunarRoverMeshGATEnv
+from models.gat_model import TorchGATModel
 
-DEFAULT_MAPS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "radio_maps_hm_18.npy")
+try:
+    import imageio
+    _HAS_IMAGEIO = True
+except ImportError:
+    _HAS_IMAGEIO = False
 
 # ---------------------------------------------------------------------------
-# Mirror the same paths / dims used in train_ppo_rllib.py
+# Paths / defaults
 # ---------------------------------------------------------------------------
-DATA_ROOT   = "/home/paolo/Documents/lunar-mesh-env/DATA/radio_data_2/radio_data_2"
-HM_PATH     = f"{DATA_ROOT}/hm/hm_18.npy"
-_PRETRAINED = os.path.join(_REPO_ROOT, "RadioLunaDiff/pretrained_models_network")
-MODEL_PATHS = {
-    "k2_model":        os.path.join(_PRETRAINED, "k2unet/best_k2_model.pth"),
-    "pmnet_model":     os.path.join(_PRETRAINED, "pmnet/best_pm_model.pt"),
-    "diffusion_model": os.path.join(_PRETRAINED, "diffusion"),
-}
-
+DATA_ROOT       = "/home/paolo/Documents/lunar-mesh-env/DATA/radio_data_2/radio_data_2"
+HM_PATH         = f"{DATA_ROOT}/hm/hm_18.npy"
+DEFAULT_MAPS    = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "radio_maps_hm_18.npy")
 RAY_RESULTS_DIR = os.path.expanduser("~/ray_results")
 NUM_AGENTS      = 3
 MAX_STEPS       = 250
-DEFAULT_DB      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_metrics_real_maps_3.db")
+DEFAULT_DB      = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "eval_metrics_gat.db")
 
 
 # ---------------------------------------------------------------------------
-# Env creator (same as training)
+# Env factory (must match train_ppo_gat.py)
 # ---------------------------------------------------------------------------
-
-def _build_radio_model(hm, maps_path=None, dummy_mode=True):
-    """Return a lookup model if maps_path is given, otherwise RadioMapModelNN."""
-    if maps_path:
-        return RadioMapModelLookup(maps_path=maps_path, heightmap=hm,
-                                   env_width=256, env_height=256)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return RadioMapModelNN(model_paths=MODEL_PATHS, heightmap=hm,
-                           env_width=256, env_height=256,
-                           dummy_mode=dummy_mode, device=device)
-
 
 def env_creator(config):
-    hm = np.load(config.get("hm_path", HM_PATH))
-    radio_model = _build_radio_model(
-        hm,
-        maps_path=config.get("maps_path", None),
-        dummy_mode=config.get("dummy_mode", True),
+    hm          = np.load(config.get("hm_path", HM_PATH))
+    maps_path   = config.get("maps_path", DEFAULT_MAPS)
+    radio_model = RadioMapModelLookup(
+        maps_path=maps_path,
+        heightmap=hm,
+        env_width=256,
+        env_height=256,
     )
-
-    raw_env = LunarRoverMeshEnv(
+    raw_env = LunarRoverMeshGATEnv(
         hm_path=config.get("hm_path", HM_PATH),
         radio_model=radio_model,
         num_agents=config.get("num_agents", NUM_AGENTS),
         render_mode="rgb_array",
         seed=19,
     )
+    raw_env.EP_MAX_TIME = config.get("max_episode_steps", MAX_STEPS)
     env = ParallelPettingZooEnv(raw_env)
     env.observation_space = raw_env.observation_spaces[raw_env.possible_agents[0]]
-    env.action_space = raw_env.action_space(raw_env.possible_agents[0])
+    env.action_space      = raw_env.action_space(raw_env.possible_agents[0])
     return env
 
 
@@ -101,9 +90,12 @@ def env_creator(config):
 # Checkpoint discovery
 # ---------------------------------------------------------------------------
 
-def find_latest_checkpoint(results_dir: str) -> str:
-    pattern = os.path.join(results_dir, "**", "checkpoint_*")
+def find_latest_checkpoint(results_dir: str, experiment_prefix: str = "lunar_mesh_ppo_gat") -> str:
+    pattern = os.path.join(results_dir, f"{experiment_prefix}*", "**", "checkpoint_*")
     candidates = glob.glob(pattern, recursive=True)
+    if not candidates:
+        # Wider fallback
+        candidates = glob.glob(os.path.join(results_dir, "**", "checkpoint_*"), recursive=True)
     if not candidates:
         raise FileNotFoundError(
             f"No checkpoints found under {results_dir}.\n"
@@ -113,19 +105,18 @@ def find_latest_checkpoint(results_dir: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Database
+# Database (same schema as eval_ppo_checkpoint.py)
 # ---------------------------------------------------------------------------
 
 def init_db(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     conn = sqlite3.connect(db_path)
-    # Migrate older DBs that predate the run_name column
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(episodes)").fetchall()}
-    if "episodes" in {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}:
-        if "run_name" not in existing:
-            conn.execute("ALTER TABLE episodes ADD COLUMN run_name TEXT")
-            conn.commit()
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(episodes)").fetchall()}
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "episodes" in tables and "run_name" not in existing_cols:
+        conn.execute("ALTER TABLE episodes ADD COLUMN run_name TEXT")
+        conn.commit()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS episodes (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,10 +133,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
             episode_id            INTEGER NOT NULL REFERENCES episodes(id),
             step                  INTEGER NOT NULL,
             agent_id              TEXT    NOT NULL,
-            -- reward
             reward                REAL,
             cumulative_reward     REAL,
-            -- navigation
             pos_x                 REAL,
             pos_y                 REAL,
             goal_x                REAL,
@@ -154,13 +143,10 @@ def init_db(db_path: str) -> sqlite3.Connection:
             total_distance        REAL,
             goals_completed       INTEGER,
             mission_done          INTEGER,
-            -- energy
             energy                REAL,
-            -- communication
             datarate_mbps         REAL,
             bs_connected          INTEGER,
             num_neighbors         INTEGER,
-            -- DTN buffer
             num_packets           INTEGER,
             num_packets_generated INTEGER,
             buffer_usage          REAL
@@ -180,23 +166,16 @@ def init_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def collect_agent_metrics(env: LunarRoverMeshEnv, agent_id: str,
-                          step: int, reward: float, cumulative: float,
-                          episode_id: int) -> tuple:
+def _agent_row(env, agent_id, step, reward, cumulative, episode_id):
     agent = env.agent_map[agent_id]
-    dtn = agent.payload_manager.get_state()
-    dist_to_goal = float(np.sqrt((agent.goal_x - agent.x)**2 + (agent.goal_y - agent.y)**2))
+    dtn   = agent.payload_manager.get_state()
+    dist  = float(np.sqrt((agent.goal_x - agent.x)**2 + (agent.goal_y - agent.y)**2))
     return (
-        episode_id,
-        step,
-        agent_id,
-        reward,
-        cumulative,
-        float(agent.x),
-        float(agent.y),
-        float(agent.goal_x),
-        float(agent.goal_y),
-        dist_to_goal,
+        episode_id, step, agent_id,
+        reward, cumulative,
+        float(agent.x), float(agent.y),
+        float(agent.goal_x), float(agent.goal_y),
+        dist,
         float(agent.total_distance),
         int(env.agent_goals_completed.get(agent_id, 0)),
         int(env.mission_done.get(agent_id, False)),
@@ -210,18 +189,16 @@ def collect_agent_metrics(env: LunarRoverMeshEnv, agent_id: str,
     )
 
 
-def collect_env_metrics(env: LunarRoverMeshEnv, step: int, episode_id: int) -> tuple:
-    active = env.agents
-    avg_dr = float(np.mean([env.agent_map[a].current_datarate for a in active])) if active else 0.0
+def _env_row(env, step, episode_id):
+    active   = env.agents
+    avg_dr   = float(np.mean([env.agent_map[a].current_datarate for a in active])) if active else 0.0
     bs_links = sum(1 for a in active if env.agent_map[a].bs_connected)
-    bs_ratio = bs_links / len(active) if active else 0.0
     return (
-        episode_id,
-        step,
+        episode_id, step,
         int(env.sim_time),
         int(env.base_station.num_packets_received),
         avg_dr,
-        bs_ratio,
+        bs_links / len(active) if active else 0.0,
         len(active),
     )
 
@@ -232,59 +209,55 @@ def collect_env_metrics(env: LunarRoverMeshEnv, step: int, episode_id: int) -> t
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to checkpoint directory. Auto-detects latest if omitted.")
+    parser.add_argument("--maps", type=str, default=None, metavar="PATH",
+                        help=f"Precomputed radio maps .npy. Defaults to {DEFAULT_MAPS}.")
     parser.add_argument("--steps", type=int, default=MAX_STEPS)
-    parser.add_argument("--out", type=str, default="eval_ppo")
+    parser.add_argument("--seed", type=int, default=199,
+                        help="Env seed for evaluation episode.")
+    parser.add_argument("--out", type=str, default="eval_gat",
+                        help="Output filename stem for the GIF.")
     parser.add_argument("--db", type=str, default=DEFAULT_DB,
                         help="SQLite database path for metrics.")
-    parser.add_argument("--name", type=str, default=None,
-                        help="Human-readable label for this run (shown in plots).")
-    parser.add_argument("--lookup-maps", type=str, default=None, metavar="PATH",
-                        help="Use precomputed radio maps (from precompute_radio_maps.py). "
-                             "Fastest and matches lookup-trained policies. "
-                             f"Defaults to {DEFAULT_MAPS} if that file exists.")
-    parser.add_argument("--dummy-mode", action="store_true", default=True,
-                        help="Use analytic radio model. Ignored when --lookup-maps is set.")
-    parser.add_argument("--no-dummy-mode", dest="dummy_mode", action="store_false")
-    parser.add_argument("--routing", default="none",
-                        choices=["none", "epidemic", "spray_and_wait"],
-                        help="DTN routing protocol applied during eval (default: none)")
-    parser.add_argument("--spray-copies", type=int, default=4)
+    parser.add_argument("--name", type=str, default="gat",
+                        help="Human-readable run label (used in plots).")
     args = parser.parse_args()
 
-    # Auto-detect lookup maps if not specified but default file exists
-    maps_path = args.lookup_maps
-    if maps_path is None and os.path.exists(DEFAULT_MAPS):
-        maps_path = DEFAULT_MAPS
-        print(f"Using precomputed radio maps: {maps_path}")
+    maps_path = args.maps or (DEFAULT_MAPS if os.path.exists(DEFAULT_MAPS) else None)
+    if maps_path is None:
+        raise SystemExit(
+            "ERROR: no radio maps file found.\n"
+            "Run examples/precompute_radio_maps.py first, or pass --maps."
+        )
+    print(f"Radio maps : {maps_path}")
 
     checkpoint = args.checkpoint or find_latest_checkpoint(RAY_RESULTS_DIR)
-    print(f"Loading checkpoint: {checkpoint}")
+    print(f"Checkpoint : {checkpoint}")
 
-    ModelCatalog.register_custom_model("action_mask_model", TorchActionMaskModel)
-    register_env("lunar_mesh_v1", env_creator)
+    # ── RLlib setup ──────────────────────────────────────────────────────────
+    ModelCatalog.register_custom_model("gat_model", TorchGATModel)
+    register_env("lunar_mesh_gat_v1", env_creator)
     ray.init(ignore_reinit_error=True, num_gpus=0)
 
-    probe = env_creator({"hm_path": HM_PATH, "num_agents": NUM_AGENTS,
-                         "dummy_mode": args.dummy_mode, "maps_path": maps_path})
+    probe     = env_creator({"hm_path": HM_PATH, "num_agents": NUM_AGENTS,
+                              "maps_path": maps_path})
     obs_space = probe.observation_space
     act_space = probe.action_space
     probe.close()
 
     algo = (
         PPOConfig()
-        .environment("lunar_mesh_v1",
+        .environment("lunar_mesh_gat_v1",
                      env_config={"num_agents": NUM_AGENTS, "hm_path": HM_PATH,
-                                 "maps_path": maps_path, "dummy_mode": args.dummy_mode})
+                                 "maps_path": maps_path})
         .framework("torch")
         .api_stack(
             enable_rl_module_and_learner=False,
             enable_env_runner_and_connector_v2=False,
         )
-        .training(
-            model={"custom_model": "action_mask_model",
-                   "_disable_preprocessor_api": True},
-        )
+        .training(model={"custom_model": "gat_model",
+                         "_disable_preprocessor_api": True})
         .multi_agent(
             policies={"shared_policy": (None, obs_space, act_space, {})},
             policy_mapping_fn=lambda agent_id, *args, **kwargs: "shared_policy",
@@ -297,39 +270,36 @@ def main():
     policy = algo.get_policy("shared_policy")
     print("Policy restored.")
 
-    # ── Build raw env for eval ────────────────────────────────────────────
-    hm = np.load(HM_PATH)
-    radio_model = _build_radio_model(hm, maps_path=maps_path, dummy_mode=args.dummy_mode)
-
-    env = LunarRoverMeshEnv(
+    # ── Build eval env ───────────────────────────────────────────────────────
+    hm          = np.load(HM_PATH)
+    radio_model = RadioMapModelLookup(maps_path=maps_path, heightmap=hm,
+                                      env_width=256, env_height=256)
+    env = LunarRoverMeshGATEnv(
         hm_path=HM_PATH,
         radio_model=radio_model,
         num_agents=NUM_AGENTS,
         render_mode="rgb_array",
-        routing_protocol=args.routing,
-        spray_copies=args.spray_copies,
-        seed=199,
+        seed=args.seed,
     )
 
-    # ── Init DB ───────────────────────────────────────────────────────────
+    # ── Init DB ──────────────────────────────────────────────────────────────
     conn = init_db(args.db)
-    cur = conn.cursor()
+    cur  = conn.cursor()
     cur.execute(
         "INSERT INTO episodes (timestamp, checkpoint, num_agents, dummy_mode, seed, run_name) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (datetime.datetime.now().isoformat(), checkpoint, NUM_AGENTS,
-         int(args.dummy_mode), 19, args.name),
+        (datetime.datetime.now().isoformat(), checkpoint, NUM_AGENTS, 0, args.seed, args.name),
     )
     conn.commit()
     episode_id = cur.lastrowid
     print(f"Episode ID {episode_id} → {args.db}")
 
-    # ── Eval loop ─────────────────────────────────────────────────────────
+    # ── Eval loop ────────────────────────────────────────────────────────────
     obs, _ = env.reset()
-    frames = []
-    total_rewards = {aid: 0.0 for aid in env.possible_agents}
-    agent_rows = []
-    env_rows   = []
+    frames         = []
+    total_rewards  = {aid: 0.0 for aid in env.possible_agents}
+    agent_rows     = []
+    env_rows       = []
 
     print(f"Running {args.steps} steps...")
     for step in range(args.steps):
@@ -349,28 +319,24 @@ def main():
 
         for aid, r in rewards.items():
             total_rewards[aid] += r
-            agent_rows.append(
-                collect_agent_metrics(env, aid, step, r, total_rewards[aid], episode_id)
-            )
-
-        env_rows.append(collect_env_metrics(env, step, episode_id))
+            agent_rows.append(_agent_row(env, aid, step, r, total_rewards[aid], episode_id))
+        env_rows.append(_env_row(env, step, episode_id))
 
         frame = env.render()
         if frame is not None:
             frames.append(frame)
 
         if step % 20 == 0:
-            reward_str = "  ".join(
-                f"{aid}: {total_rewards[aid]:.1f}" for aid in env.possible_agents
-            )
-            print(f"  step {step:>4}  |  cumulative rewards: {reward_str}"
-                  f"  |  BS pkts: {env.base_station.num_packets_received}")
+            reward_str = "  ".join(f"{aid}: {total_rewards[aid]:.1f}" for aid in env.possible_agents)
+            print(f"  step {step:>4}  |  {reward_str}"
+                  f"  |  BS pkts: {env.base_station.num_packets_received}"
+                  f"  |  BS conn: {sum(env.agent_map[a].bs_connected for a in env.agents)}/{len(env.agents)}")
 
         if all(terms.values()) or all(truncs.values()):
             print(f"Episode finished at step {step}.")
             break
 
-    # ── Write metrics to DB ───────────────────────────────────────────────
+    # ── Write metrics ────────────────────────────────────────────────────────
     conn.executemany(
         "INSERT INTO step_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         agent_rows,
@@ -388,15 +354,19 @@ def main():
     algo.stop()
     ray.shutdown()
 
-    # ── Save video ────────────────────────────────────────────────────────
-    if frames:
+    # ── Save GIF ─────────────────────────────────────────────────────────────
+    if frames and _HAS_IMAGEIO:
         gif_path = f"{args.out}.gif"
         imageio.mimsave(gif_path, frames, fps=4)
         print(f"Saved {gif_path}")
+    elif frames and not _HAS_IMAGEIO:
+        print("imageio not installed — skipping GIF. Run: pip install imageio")
 
     print("\nFinal cumulative rewards:")
     for aid, r in total_rewards.items():
         print(f"  {aid}: {r:.2f}")
+    print(f"\nPackets delivered to BS: {env.base_station.num_packets_received}"
+          f"  (unique: {len(env.base_station.packets_received)})")
 
 
 if __name__ == "__main__":

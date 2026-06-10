@@ -201,8 +201,8 @@ class MarlMeshDTNAgent(MarlAgent):
             if rate > 0:
                 self.payload_manager.send_packets(target, rate, step_duration, sim_time)
 
-    def generate_packet(self, size: int, time_to_live: float, destination: str, time:float):
-        self.payload_manager.generate_packet(size, time_to_live, destination, time, self.x, self.y)
+    def generate_packet(self, size: int, time_to_live: float, destination: str, time: float, copies: int = 1):
+        self.payload_manager.generate_packet(size, time_to_live, destination, time, self.x, self.y, copies=copies)
 
     def drop_expired_packets(self, time: float):
         self.payload_manager.drop_expired_packets(time)

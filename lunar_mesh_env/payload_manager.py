@@ -1,5 +1,6 @@
 # payload_manager.py
 
+import copy as _copy
 from collections import deque
 from time import time
 from typing import Set, Dict, List
@@ -7,17 +8,18 @@ from typing import Set, Dict, List
 class Packet:
     counter = 0
 
-    def __init__(self, source, destination, size, time_to_live, gen_step, origin_x, origin_y):
+    def __init__(self, source, destination, size, time_to_live, gen_step, origin_x, origin_y, copies=1):
         self.packet_id = f"P_{Packet.counter}"
         Packet.counter += 1
         self.size = size
-        self.gen_step = gen_step  
+        self.gen_step = gen_step
         self.time_to_live = time_to_live
         self.source = source
         self.destination = destination
         self.origin_x = origin_x
         self.origin_y = origin_y
         self.touched = {source}
+        self.copies = copies  # spray-and-wait token count; 1 = wait mode
 
 
 class PayloadManager:
@@ -121,17 +123,61 @@ class PayloadManager:
         self.buffer.append(packet)
         self.payload_size += packet.size
 
-    def generate_packet(self, size, time_to_live, destination, current_step, origin_x, origin_y):
+    def generate_packet(self, size, time_to_live, destination, current_step, origin_x, origin_y, copies=1):
         while size + self.payload_size > self.buffer_size:
             packet = self.buffer.popleft()
             self.payload_size -= packet.size
-        
-        packet = Packet(source=self.id, destination=destination, size=size, 
-                        time_to_live=time_to_live, gen_step=current_step, 
-                        origin_x=origin_x, origin_y=origin_y)
+
+        packet = Packet(source=self.id, destination=destination, size=size,
+                        time_to_live=time_to_live, gen_step=current_step,
+                        origin_x=origin_x, origin_y=origin_y, copies=copies)
         self.buffer.append(packet)
         self.payload_size += size
         self.num_packets_generated += 1
+
+    # ------------------------------------------------------------------
+    # DTN routing helpers (called by env routing protocol, not actions)
+    # ------------------------------------------------------------------
+
+    def epidemic_forward(self, target: 'PayloadManager') -> int:
+        """Copy all held packets to target that it does not already have.
+
+        The sender keeps its own copy — this is true epidemic replication.
+        Returns the number of packets forwarded.
+        """
+        target_ids = {p.packet_id for p in target.buffer}
+        forwarded = 0
+        for packet in self.buffer:
+            if packet.packet_id not in target_ids:
+                target.receive_packet(packet)
+                forwarded += 1
+        return forwarded
+
+    def spray_forward(self, target: 'PayloadManager') -> int:
+        """Spray-and-wait: split token copies with target for sprayable packets.
+
+        For each packet with copies > 1 that the target does not have:
+          - give target floor(copies / 2) tokens
+          - keep ceil(copies / 2) tokens
+        Packets with copies == 1 are in wait mode and are not forwarded
+        (they should only be delivered directly to the destination/BS).
+        Returns the number of packets forwarded.
+        """
+        target_ids = {p.packet_id for p in target.buffer}
+        forwarded = 0
+        for packet in self.buffer:
+            if packet.copies <= 1:
+                continue
+            if packet.packet_id in target_ids:
+                continue
+            give = packet.copies // 2
+            packet.copies -= give
+            p_copy = _copy.copy(packet)
+            p_copy.touched = packet.touched.copy()
+            p_copy.copies = give
+            target.receive_packet(p_copy)
+            forwarded += 1
+        return forwarded
     
     def get_state(self):
         return {

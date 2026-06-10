@@ -12,15 +12,17 @@ _SPATIAL_KEYS = {"terrain", "radio_map", "action_mask"}
 
 # Scalar keys fed to the network (alphabetical = flat-obs order after mask).
 _SCALAR_KEYS = [
+    # Must be in alphabetical order — gymnasium flattens Dict obs alphabetically,
+    # so this list must match that order for train/eval consistency.
     # -- disabled (kept for future use) --
     # "buffer_usage",             # (1,)
     # "energy",                   # (1,)
-    # "num_packets",              # (1,)
     # "other_agent_connectivity", # (num_agents+1,)
     # "other_agent_vectors",      # (num_agents+1, 2)
     # ------------------------------------
     "goal_vector",              # (2,)
     "move_history",             # (HISTORY_LEN,) — last N movement actions, scaled to [0,256]
+    # "num_packets",              # (1,)
     "position",                 # (2,)
 ]
 
@@ -29,12 +31,13 @@ _NORM = {
     # -- disabled (kept for future use) --
     # "buffer_usage":             1.0,
     # "energy":                   5_000_000.0,
-    # "num_packets":              1000.0,
+    
     # "other_agent_connectivity": 1.0,
     # "other_agent_vectors":      256.0,
     # ------------------------------------
     "goal_vector":              256.0,
     "move_history":             256.0,
+    # "num_packets":              1000.0,
     "position":                 256.0,
 }
 
@@ -54,6 +57,16 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
                 for k, s in orig_space.spaces.items()
                 if k not in _SPATIAL_KEYS
             )
+            # Per-key normalization vector for the flat training path.
+            # RLlib flattens Dict obs alphabetically, so build the divisors
+            # in the same alphabetical order (spatial keys excluded).
+            norm_parts = []
+            for k in sorted(k for k in orig_space.spaces.keys() if k not in _SPATIAL_KEYS):
+                dim = gym.spaces.utils.flatdim(orig_space.spaces[k])
+                norm_parts.extend([_NORM.get(k, 256.0)] * dim)
+            self.register_buffer("_flat_norm",
+                                 torch.tensor(norm_parts, dtype=torch.float32),
+                                 persistent=False)
         else:
             # Flattened obs: mask occupies the first num_outputs slots,
             # then compact scalars. Total flat dim - mask - map dims = scalars.
@@ -61,6 +74,9 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
             map_dim = 256 * 256 * 2          # terrain + radio_map
             self.mask_size = num_outputs
             self.feature_dim = total_dim - self.mask_size - map_dim
+            self.register_buffer("_flat_norm",
+                                 torch.full((self.feature_dim,), 256.0),
+                                 persistent=False)
 
         # Policy network
         self.internal_model = nn.Sequential(
@@ -88,7 +104,7 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
             # Flat path (training): scalars sit between mask and the two maps.
             # Layout (alphabetical): mask | scalars(feature_dim) | radio_map | terrain
             action_mask = obs[:, :self.mask_size].float()
-            flat_obs    = obs[:, self.mask_size: self.mask_size + self.feature_dim] / 256.0
+            flat_obs    = obs[:, self.mask_size: self.mask_size + self.feature_dim] / self._flat_norm
 
         features = self.internal_model[:-1](flat_obs)
         logits   = self.internal_model[-1](features)

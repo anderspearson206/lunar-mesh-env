@@ -37,7 +37,7 @@ class LunarRoverMeshEnv(ParallelEnv):
 
     HISTORY_LEN = 4   # number of past movement actions kept in observation
 
-    def __init__(self, 
+    def __init__(self,
                  hm_path='../radio_data_2/radio_data_2/hm/hm_18.npy',
                  radio_model: RadioMapModelNN = None,
                  num_agents=3,
@@ -47,6 +47,8 @@ class LunarRoverMeshEnv(ParallelEnv):
                  packet_mode = 'boolean',
                  buffer_capacity_bits = 100*1024**3, # 100 GB buffer capacity
                  data_rate_mbps = 10.0,
+                 routing_protocol: str = 'none',
+                 spray_copies: int = 4,
                  seed=206):
         
         self.render_mode = render_mode
@@ -105,8 +107,10 @@ class LunarRoverMeshEnv(ParallelEnv):
 
         # DTN config
         self.PACKET_GEN_PROB = 0.5
-        self.REWARD_PACKET_DELIVERY = 0.0
+        self.REWARD_PACKET_DELIVERY = 2.0
         self.PENALTY_BUFFER_OVERFLOW = 0 #-5.0
+        self.routing_protocol = routing_protocol  # 'none' | 'epidemic' | 'spray_and_wait'
+        self.spray_copies = spray_copies          # initial token count for spray-and-wait
         
 
         self.base_station = BaseStation(x=0.0, y=0.0)
@@ -452,32 +456,84 @@ class LunarRoverMeshEnv(ParallelEnv):
             # random packet generation
             if self.packet_mode == 'boolean':
                 if np.random.rand() < self.PACKET_GEN_PROB and not self.mission_done.get(agent_id, False):
-                    agent.generate_packet(size=10, time_to_live=50, destination="BS_0", time=self.sim_time)
+                    agent.generate_packet(size=10, time_to_live=50, destination="BS_0", time=self.sim_time,
+                                          copies=self.spray_copies)
             else:
                 # constant amount
                 bits_needed = self.TELEMETRY_RATE_MBPS * self.STEP_LENGTH * 1e6
                 num_telemetry = int(bits_needed / PACKET_SIZE_BITS)
-                
+
                 for _ in range(num_telemetry):
-                    agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=5000, destination="BS_0", time=self.sim_time)
+                    agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=5000, destination="BS_0",
+                                          time=self.sim_time, copies=self.spray_copies)
 
                 # science burst (simulating finding area of interest and generating large amounts of data)
                 if np.random.rand() < BURST_PROBABILITY:
                     bits_burst = BURST_SIZE_MBITS * 1e6
                     num_burst = int(bits_burst / PACKET_SIZE_BITS)
-                    
+
                     dtn_state = agent.payload_manager.get_state()
                     space_left = dtn_state['buffer_size'] - dtn_state['payload_size']
-                    
+
                     packets_to_gen = min(num_burst, int(space_left / PACKET_SIZE_BITS))
-                    
+
                     if packets_to_gen > 0:
                         for _ in range(packets_to_gen):
-                            agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=5000, destination="BS_0", time=self.sim_time)
+                            agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=5000, destination="BS_0",
+                                                  time=self.sim_time, copies=self.spray_copies)
                             
+        # Run autonomous DTN routing protocol after action-driven sends.
+        if self.routing_protocol != 'none':
+            self._apply_routing_protocol(rewards)
+
         return actions, rewards, infos
 
+    def _apply_routing_protocol(self, rewards):
+        """Automatic peer forwarding and BS delivery for epidemic / spray-and-wait.
 
+        Runs independently of the RL comm action — agents exchange packets
+        whenever they are physical neighbors, and deliver everything to the BS
+        when directly connected.
+        """
+        active = [self.agent_map[aid] for aid in self.agents
+                  if self.agent_map[aid].energy > 0]
+
+        # Peer-to-peer forwarding (each pair processed once)
+        seen_pairs: set = set()
+        for agent in active:
+            for neighbor in list(agent.neighbors):
+                if not hasattr(neighbor, 'payload_manager'):
+                    continue  # skip BS
+                pair = frozenset((agent.id, neighbor.id))
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+
+                if self.routing_protocol == 'epidemic':
+                    agent.payload_manager.epidemic_forward(neighbor.payload_manager)
+                    neighbor.payload_manager.epidemic_forward(agent.payload_manager)
+                elif self.routing_protocol == 'spray_and_wait':
+                    agent.payload_manager.spray_forward(neighbor.payload_manager)
+                    neighbor.payload_manager.spray_forward(agent.payload_manager)
+
+                # Sync network state so cleanup_buffer works correctly next step
+                for p in agent.payload_manager.buffer:
+                    agent.network_state[agent.id].add(p.packet_id)
+                for p in neighbor.payload_manager.buffer:
+                    neighbor.network_state[neighbor.id].add(p.packet_id)
+
+        # Direct BS delivery (all protocols: deliver everything when connected)
+        for agent in active:
+            if not agent.bs_connected:
+                continue
+            pre = self.base_station.num_packets_received
+            for packet in list(agent.payload_manager.buffer):
+                self.base_station.receive_packet(packet, self.sim_time)
+            delivered = self.base_station.num_packets_received - pre
+            if delivered > 0:
+                rewards[agent.id] = rewards.get(agent.id, 0.0) + delivered * self.REWARD_PACKET_DELIVERY
+            # Tell agent what BS has so cleanup_buffer removes them next step
+            agent.network_state["BS_0"].update(self.base_station.packets_received)
 
     def _handle_movement_step(self, actions, rewards, infos):
         for agent_id, action in actions.items():
@@ -791,7 +847,13 @@ class LunarRoverMeshEnv(ParallelEnv):
 
 
 
+# duplicate packets, unique packets, 
+# Run A* with comms
 
+# find optimum packet in epidemic
+# number of times you have seen a rover: frequency of connection to certain rovers
+# Add quadrants to rover instead of random goals. More like Roaming DTN
+# Observation space could include area rover is working in
 
 
 

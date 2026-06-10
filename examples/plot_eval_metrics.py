@@ -93,10 +93,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--db",  default=DEFAULT_DB)
     parser.add_argument("--out", default=DEFAULT_OUT)
+    parser.add_argument("--include", nargs="+", metavar="SUBSTR",
+                        help="Only plot episodes whose run_name contains any of these substrings")
     args = parser.parse_args()
 
     conn     = sqlite3.connect(args.db)
     episodes = load_episodes(conn)
+    if args.include:
+        episodes = [ep for ep in episodes
+                    if any(s in ep["label"] for s in args.include)]
     if not episodes:
         print("No episodes found in database.")
         return
