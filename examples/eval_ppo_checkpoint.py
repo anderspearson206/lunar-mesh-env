@@ -38,7 +38,10 @@ if _REPO_ROOT not in sys.path:
 
 from lunar_mesh_env import LunarRoverMeshEnv, RadioMapModelNN
 from lunar_mesh_env.radio_model_lookup import RadioMapModelLookup
+from lunar_mesh_env.spatial_features import SpatialObsWrapper
 from models.action_mask_model import TorchActionMaskModel
+from models.alphastar_model import TorchAlphaStarModel
+from models.ar_action_dist import TorchARMaskedDistribution
 
 DEFAULT_MAPS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "radio_maps_hm_18.npy")
@@ -91,9 +94,10 @@ def env_creator(config):
         render_mode="rgb_array",
         seed=19,
     )
-    env = ParallelPettingZooEnv(raw_env)
-    env.observation_space = raw_env.observation_spaces[raw_env.possible_agents[0]]
-    env.action_space = raw_env.action_space(raw_env.possible_agents[0])
+    pz_env = SpatialObsWrapper(raw_env) if config.get("alphastar") else raw_env
+    env = ParallelPettingZooEnv(pz_env)
+    env.observation_space = pz_env.observation_spaces[raw_env.possible_agents[0]]
+    env.action_space = pz_env.action_space(raw_env.possible_agents[0])
     return env
 
 
@@ -250,7 +254,12 @@ def main():
                         choices=["none", "epidemic", "spray_and_wait"],
                         help="DTN routing protocol applied during eval (default: none)")
     parser.add_argument("--spray-copies", type=int, default=4)
+    parser.add_argument("--model", default="mlp", choices=["mlp", "alphastar"],
+                        help="Policy architecture the checkpoint was trained with: "
+                             "'mlp' (train_ppo_lookup.py) or 'alphastar' "
+                             "(train_ppo_alphastar.py)")
     args = parser.parse_args()
+    alphastar = args.model == "alphastar"
 
     # Auto-detect lookup maps if not specified but default file exists
     maps_path = args.lookup_maps
@@ -262,28 +271,39 @@ def main():
     print(f"Loading checkpoint: {checkpoint}")
 
     ModelCatalog.register_custom_model("action_mask_model", TorchActionMaskModel)
+    ModelCatalog.register_custom_model("alphastar_model", TorchAlphaStarModel)
+    ModelCatalog.register_custom_action_dist("ar_masked_dist",
+                                             TorchARMaskedDistribution)
     register_env("lunar_mesh_v1", env_creator)
     ray.init(ignore_reinit_error=True, num_gpus=0)
 
-    probe = env_creator({"hm_path": HM_PATH, "num_agents": NUM_AGENTS,
-                         "dummy_mode": args.dummy_mode, "maps_path": maps_path})
+    env_config = {"num_agents": NUM_AGENTS, "hm_path": HM_PATH,
+                  "maps_path": maps_path, "dummy_mode": args.dummy_mode,
+                  "alphastar": alphastar}
+    probe = env_creator(env_config)
     obs_space = probe.observation_space
     act_space = probe.action_space
     probe.close()
 
+    if alphastar:
+        model_dict = {"custom_model": "alphastar_model",
+                      "custom_action_dist": "ar_masked_dist",
+                      "custom_model_config": {"kl_coeff_sl": 0.0},
+                      "_disable_preprocessor_api": True}
+    else:
+        model_dict = {"custom_model": "action_mask_model",
+                      "_disable_preprocessor_api": True}
+
     algo = (
         PPOConfig()
-        .environment("lunar_mesh_v1",
-                     env_config={"num_agents": NUM_AGENTS, "hm_path": HM_PATH,
-                                 "maps_path": maps_path, "dummy_mode": args.dummy_mode})
+        .environment("lunar_mesh_v1", env_config=env_config)
         .framework("torch")
         .api_stack(
             enable_rl_module_and_learner=False,
             enable_env_runner_and_connector_v2=False,
         )
         .training(
-            model={"custom_model": "action_mask_model",
-                   "_disable_preprocessor_api": True},
+            model=model_dict,
         )
         .multi_agent(
             policies={"shared_policy": (None, obs_space, act_space, {})},
@@ -310,6 +330,9 @@ def main():
         spray_copies=args.spray_copies,
         seed=199,
     )
+    if alphastar:
+        # Same obs transform as training; metrics/render delegate to the raw env.
+        env = SpatialObsWrapper(env)
 
     # ── Init DB ───────────────────────────────────────────────────────────
     conn = init_db(args.db)
