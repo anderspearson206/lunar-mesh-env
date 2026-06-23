@@ -16,11 +16,11 @@ _SCALAR_KEYS = [
     # "buffer_usage",             # (1,)
     # "energy",                   # (1,)
     # "num_packets",              # (1,)
-    # "other_agent_connectivity", # (num_agents+1,)
     # "other_agent_vectors",      # (num_agents+1, 2)
     # ------------------------------------
     "goal_vector",              # (2,)
     "move_history",             # (HISTORY_LEN,) — last N movement actions, scaled to [0,256]
+    "other_agent_connectivity", # (num_agents+1,) = (4,)
     "position",                 # (2,)
 ]
 
@@ -30,11 +30,11 @@ _NORM = {
     # "buffer_usage":             1.0,
     # "energy":                   5_000_000.0,
     # "num_packets":              1000.0,
-    # "other_agent_connectivity": 1.0,
     # "other_agent_vectors":      256.0,
     # ------------------------------------
     "goal_vector":              256.0,
     "move_history":             256.0,
+    "other_agent_connectivity": 1.0,
     "position":                 256.0,
 }
 
@@ -62,6 +62,19 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
             self.mask_size = num_outputs
             self.feature_dim = total_dim - self.mask_size - map_dim
 
+        # Per-key normalisation vector for the flat training path.
+        # Built from the same obs space keys, alphabetical order (matching gymnasium flatten).
+        # persistent=False: not saved in checkpoints, rebuilt from obs space at load time.
+        norm_parts = []
+        for k in sorted(k for k in orig_space.spaces.keys() if k not in _SPATIAL_KEYS):
+            dim = gym.spaces.utils.flatdim(orig_space.spaces[k])
+            norm_parts.extend([_NORM.get(k, 256.0)] * dim)
+        self.register_buffer(
+            "_flat_norm",
+            torch.tensor(norm_parts, dtype=torch.float32),
+            persistent=False,
+        )
+
         # Policy network
         self.internal_model = nn.Sequential(
             nn.Linear(int(self.feature_dim), 256),
@@ -88,7 +101,7 @@ class TorchActionMaskModel(TorchModelV2, nn.Module):
             # Flat path (training): scalars sit between mask and the two maps.
             # Layout (alphabetical): mask | scalars(feature_dim) | radio_map | terrain
             action_mask = obs[:, :self.mask_size].float()
-            flat_obs    = obs[:, self.mask_size: self.mask_size + self.feature_dim] / 256.0
+            flat_obs    = obs[:, self.mask_size: self.mask_size + self.feature_dim] / self._flat_norm
 
         features = self.internal_model[:-1](flat_obs)
         logits   = self.internal_model[-1](features)

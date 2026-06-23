@@ -119,13 +119,21 @@ def find_latest_checkpoint(results_dir: str) -> str:
 def init_db(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     conn = sqlite3.connect(db_path)
-    # Migrate older DBs that predate the run_name column
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(episodes)").fetchall()}
-    if "episodes" in {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}:
-        if "run_name" not in existing:
-            conn.execute("ALTER TABLE episodes ADD COLUMN run_name TEXT")
-            conn.commit()
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    # Migrate episodes table
+    existing_ep = {r[1] for r in conn.execute("PRAGMA table_info(episodes)").fetchall()}
+    if "episodes" in tables and "run_name" not in existing_ep:
+        conn.execute("ALTER TABLE episodes ADD COLUMN run_name TEXT")
+        conn.commit()
+    # Migrate env_step_metrics table
+    existing_env = {r[1] for r in conn.execute("PRAGMA table_info(env_step_metrics)").fetchall()}
+    if "env_step_metrics" in tables:
+        if "bs_unique_packets" not in existing_env:
+            conn.execute("ALTER TABLE env_step_metrics ADD COLUMN bs_unique_packets INTEGER")
+        if "bs_duplicate_packets" not in existing_env:
+            conn.execute("ALTER TABLE env_step_metrics ADD COLUMN bs_duplicate_packets INTEGER")
+        conn.commit()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS episodes (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,6 +179,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
             step                  INTEGER NOT NULL,
             sim_time              INTEGER,
             bs_packets_received   INTEGER,
+            bs_unique_packets     INTEGER,
+            bs_duplicate_packets  INTEGER,
             avg_datarate_mbps     REAL,
             bs_link_ratio         REAL,
             num_active_agents     INTEGER
@@ -215,11 +225,14 @@ def collect_env_metrics(env: LunarRoverMeshEnv, step: int, episode_id: int) -> t
     avg_dr = float(np.mean([env.agent_map[a].current_datarate for a in active])) if active else 0.0
     bs_links = sum(1 for a in active if env.agent_map[a].bs_connected)
     bs_ratio = bs_links / len(active) if active else 0.0
+    bs = env.base_station
     return (
         episode_id,
         step,
         int(env.sim_time),
-        int(env.base_station.num_packets_received),
+        int(bs.num_packets_received),
+        int(len(bs.packets_received)),
+        int(bs.num_duplicates_received),
         avg_dr,
         bs_ratio,
         len(active),
@@ -370,7 +383,7 @@ def main():
         agent_rows,
     )
     conn.executemany(
-        "INSERT INTO env_step_metrics VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO env_step_metrics VALUES (?,?,?,?,?,?,?,?,?)",
         env_rows,
     )
     cur.execute("UPDATE episodes SET total_steps=? WHERE id=?", (step + 1, episode_id))

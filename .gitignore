@@ -6,8 +6,10 @@
 *.db
 *.png
 *.gz
+*.pth
 
 DATA/ 
+results
 
 .venv/
 

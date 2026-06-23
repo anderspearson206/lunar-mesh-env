@@ -105,7 +105,7 @@ class LunarRoverMeshEnv(ParallelEnv):
 
         # DTN config
         self.PACKET_GEN_PROB = 0.5
-        self.REWARD_PACKET_DELIVERY = 0.0
+        self.REWARD_PACKET_DELIVERY = 1.0
         self.PENALTY_BUFFER_OVERFLOW = 0 #-5.0
         
 
@@ -743,7 +743,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             "move_history": move_history,
             # "num_packets": np.clip(obs_dict["num_packets"].astype(np.float32), 0.0, 1000.0),
             # "other_agent_vectors": np.clip(obs_dict["other_agent_vectors"].astype(np.float32), -256.0, 256.0),
-            # "other_agent_connectivity": np.clip(obs_dict["other_agent_connectivity"].astype(np.float32), 0.0, 1.0),
+            "other_agent_connectivity": np.clip(obs_dict["other_agent_connectivity"].astype(np.float32), 0.0, 1.0),
             "terrain":      obs_dict["terrain"],
             "radio_map":    np.clip(obs_dict["radio_map"],   -200.0, 0.0),
             "action_mask":  action_mask,
@@ -770,7 +770,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             "move_history": spaces.Box(low=0,    high=256, shape=(self.HISTORY_LEN,), dtype=np.float32),
             # "num_packets": spaces.Box(low=0, high=1000, shape=(1,), dtype=np.float32),
             # "other_agent_vectors": spaces.Box(low=-256, high=256, shape=(num_rovers + 1, 2), dtype=np.float32),
-            # "other_agent_connectivity": spaces.Box(low=0, high=1, shape=(num_rovers + 1,), dtype=np.float32),
+            "other_agent_connectivity": spaces.Box(low=0, high=1, shape=(num_rovers + 1,), dtype=np.float32),
             "terrain": spaces.Box(low=0, high=500, shape=(1, 256, 256), dtype=np.float32),
             "radio_map": spaces.Box(low=-200, high=0, shape=(1, 256, 256), dtype=np.float32),
             "action_mask": spaces.Box(low=0, high=1, shape=(mask_dim,), dtype=np.int8)
@@ -791,6 +791,13 @@ class LunarRoverMeshEnv(ParallelEnv):
 
 
 
+# duplicate packets, unique packets, 
+# Run A* with comms
+
+# find optimum packet in epidemic
+# number of times you have seen a rover: frequency of connection to certain rovers
+# Add quadrants to rover instead of random goals. More like Roaming DTN
+# Observation space could include area rover is working in
 
 
 
