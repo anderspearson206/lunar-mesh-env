@@ -37,8 +37,14 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from lunar_mesh_env import LunarRoverMeshEnv, RadioMapModelNN
+from lunar_mesh_env.marl_env_mlp_gat import LunarRoverMeshMLPGATEnv
+from lunar_mesh_env.marl_env_radio import LunarRoverMeshRadioEnv
 from lunar_mesh_env.radio_model_lookup import RadioMapModelLookup
 from models.action_mask_model import TorchActionMaskModel
+from models.mlp_gat_model import TorchMLPGATModel
+from models.mlp_gat_radio_model import TorchMLPGATRadioModel
+
+_RADIO_MODES = {"radio_rssi": "rssi", "radio_crop": "crop", "radio_full": "full"}
 
 DEFAULT_MAPS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "radio_maps_hm_18.npy")
@@ -84,13 +90,32 @@ def env_creator(config):
         dummy_mode=config.get("dummy_mode", True),
     )
 
-    raw_env = LunarRoverMeshEnv(
-        hm_path=config.get("hm_path", HM_PATH),
-        radio_model=radio_model,
-        num_agents=config.get("num_agents", NUM_AGENTS),
-        render_mode="rgb_array",
-        seed=19,
-    )
+    model_type = config.get("model_type", "mlp")
+    if model_type in _RADIO_MODES:
+        raw_env = LunarRoverMeshRadioEnv(
+            hm_path=config.get("hm_path", HM_PATH),
+            radio_model=radio_model,
+            num_agents=config.get("num_agents", NUM_AGENTS),
+            radio_obs=_RADIO_MODES[model_type],
+            render_mode="rgb_array",
+            seed=19,
+        )
+    elif model_type == "mlp_gat":
+        raw_env = LunarRoverMeshMLPGATEnv(
+            hm_path=config.get("hm_path", HM_PATH),
+            radio_model=radio_model,
+            num_agents=config.get("num_agents", NUM_AGENTS),
+            render_mode="rgb_array",
+            seed=19,
+        )
+    else:
+        raw_env = LunarRoverMeshEnv(
+            hm_path=config.get("hm_path", HM_PATH),
+            radio_model=radio_model,
+            num_agents=config.get("num_agents", NUM_AGENTS),
+            render_mode="rgb_array",
+            seed=19,
+        )
     env = ParallelPettingZooEnv(raw_env)
     env.observation_space = raw_env.observation_spaces[raw_env.possible_agents[0]]
     env.action_space = raw_env.action_space(raw_env.possible_agents[0])
@@ -259,6 +284,10 @@ def main():
     parser.add_argument("--dummy-mode", action="store_true", default=True,
                         help="Use analytic radio model. Ignored when --lookup-maps is set.")
     parser.add_argument("--no-dummy-mode", dest="dummy_mode", action="store_false")
+    parser.add_argument("--model",
+                        choices=["mlp", "mlp_gat", "radio_rssi", "radio_crop", "radio_full"],
+                        default="mlp",
+                        help="Policy architecture to evaluate (default: mlp)")
     args = parser.parse_args()
 
     # Auto-detect lookup maps if not specified but default file exists
@@ -269,30 +298,45 @@ def main():
 
     checkpoint = args.checkpoint or find_latest_checkpoint(RAY_RESULTS_DIR)
     print(f"Loading checkpoint: {checkpoint}")
+    print(f"Model type: {args.model}")
 
-    ModelCatalog.register_custom_model("action_mask_model", TorchActionMaskModel)
+    ModelCatalog.register_custom_model("action_mask_model",    TorchActionMaskModel)
+    ModelCatalog.register_custom_model("mlp_gat_model",        TorchMLPGATModel)
+    ModelCatalog.register_custom_model("mlp_gat_radio_model",  TorchMLPGATRadioModel)
     register_env("lunar_mesh_v1", env_creator)
     ray.init(ignore_reinit_error=True, num_gpus=0)
 
-    probe = env_creator({"hm_path": HM_PATH, "num_agents": NUM_AGENTS,
-                         "dummy_mode": args.dummy_mode, "maps_path": maps_path})
+    env_config = {"num_agents": NUM_AGENTS, "hm_path": HM_PATH,
+                  "maps_path": maps_path, "dummy_mode": args.dummy_mode,
+                  "model_type": args.model}
+
+    if args.model in _RADIO_MODES:
+        custom_model      = "mlp_gat_radio_model"
+        extra_model_cfg   = {"custom_model_config": {"radio_mode": _RADIO_MODES[args.model]}}
+    elif args.model == "mlp_gat":
+        custom_model      = "mlp_gat_model"
+        extra_model_cfg   = {}
+    else:
+        custom_model      = "action_mask_model"
+        extra_model_cfg   = {}
+
+    probe = env_creator(env_config)
     obs_space = probe.observation_space
     act_space = probe.action_space
     probe.close()
 
     algo = (
         PPOConfig()
-        .environment("lunar_mesh_v1",
-                     env_config={"num_agents": NUM_AGENTS, "hm_path": HM_PATH,
-                                 "maps_path": maps_path, "dummy_mode": args.dummy_mode})
+        .environment("lunar_mesh_v1", env_config=env_config)
         .framework("torch")
         .api_stack(
             enable_rl_module_and_learner=False,
             enable_env_runner_and_connector_v2=False,
         )
         .training(
-            model={"custom_model": "action_mask_model",
-                   "_disable_preprocessor_api": True},
+            model={"custom_model": custom_model,
+                   "_disable_preprocessor_api": True,
+                   **extra_model_cfg},
         )
         .multi_agent(
             policies={"shared_policy": (None, obs_space, act_space, {})},
@@ -310,13 +354,31 @@ def main():
     hm = np.load(HM_PATH)
     radio_model = _build_radio_model(hm, maps_path=maps_path, dummy_mode=args.dummy_mode)
 
-    env = LunarRoverMeshEnv(
-        hm_path=HM_PATH,
-        radio_model=radio_model,
-        num_agents=NUM_AGENTS,
-        render_mode="rgb_array",
-        seed=199,
-    )
+    if args.model in _RADIO_MODES:
+        env = LunarRoverMeshRadioEnv(
+            hm_path=HM_PATH,
+            radio_model=radio_model,
+            num_agents=NUM_AGENTS,
+            radio_obs=_RADIO_MODES[args.model],
+            render_mode="rgb_array",
+            seed=199,
+        )
+    elif args.model == "mlp_gat":
+        env = LunarRoverMeshMLPGATEnv(
+            hm_path=HM_PATH,
+            radio_model=radio_model,
+            num_agents=NUM_AGENTS,
+            render_mode="rgb_array",
+            seed=199,
+        )
+    else:
+        env = LunarRoverMeshEnv(
+            hm_path=HM_PATH,
+            radio_model=radio_model,
+            num_agents=NUM_AGENTS,
+            render_mode="rgb_array",
+            seed=199,
+        )
 
     # ── Init DB ───────────────────────────────────────────────────────────
     conn = init_db(args.db)
