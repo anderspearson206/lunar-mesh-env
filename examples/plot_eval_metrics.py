@@ -1,160 +1,267 @@
 """
-Plot evaluation metrics from eval.db, comparing all stored episodes.
+Plot evaluation metrics from metrics.db, comparing algorithms averaged over episodes.
+
+Groups episodes by run_name, then plots mean ± std band at each step.
 
 Usage:
     python examples/plot_eval_metrics.py
-    python examples/plot_eval_metrics.py --db examples/eval.db --out eval_comparison.png
+    python examples/plot_eval_metrics.py --db examples/metrics.db --out comparison.png
+    python examples/plot_eval_metrics.py --include lozano_ppo epidemic
 """
 
 import argparse
 import os
 import sqlite3
+from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 
-DEFAULT_DB  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval.db")
+DEFAULT_DB  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "metrics.db")
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_comparison.png")
 
-
-def _label_from_checkpoint(ckpt: str, ep_id: int, dummy_mode: int) -> str:
-    """Build a human-readable label from the checkpoint path when run_name is absent."""
-    trial = os.path.basename(os.path.dirname(ckpt))      # e.g. PPO_lunar_mesh_v1_db173_00000_0_2026-04-05_07-29-29
-    ckpt_dir = os.path.basename(ckpt)                    # e.g. checkpoint_000009
-    # extract training date: parts after the last plain-digit segment "0_YYYY-MM-DD"
-    parts = trial.split("_")
-    try:
-        # date sits at parts[7]-[9]: 2026, 04, 05
-        train_date = f"{parts[7]}-{parts[8]}-{parts[9]}"
-    except IndexError:
-        train_date = "?"
-    try:
-        ckpt_iter = int(ckpt_dir.split("_")[-1])
-    except (ValueError, IndexError):
-        ckpt_iter = -1
-    mode = "dummy" if dummy_mode else "real NN"
-    return f"Ep{ep_id}  {train_date}  iter {ckpt_iter}  [{mode}]"
+# Friendly display order and colours
+_RUN_ORDER  = ["epidemic_vahdat", "lozano_ppo", "lozano_ddqn"]
+_RUN_LABELS = {
+    "epidemic_vahdat": "Vahdat Epidemic (BW-constrained)",
+    "lozano_ppo":      "Lozano PPO",
+    "lozano_ddqn":     "Lozano DDQN",
+}
+_COLOURS    = ["#e15759", "#4e79a7", "#59a14f"]   # red, blue, green
 
 
-def load_episodes(conn: sqlite3.Connection) -> list[dict]:
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(episodes)").fetchall()}
-    has_run_name   = "run_name"   in cols
-    has_dummy_mode = "dummy_mode" in cols
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
 
-    select = "SELECT id, timestamp, checkpoint, total_steps"
-    select += ", run_name"   if has_run_name   else ", NULL"
-    select += ", dummy_mode" if has_dummy_mode  else ", 1"
-    select += " FROM episodes ORDER BY id"
-
-    episodes = []
-    for ep_id, ts, ckpt, total_steps, run_name, dummy_mode in conn.execute(select).fetchall():
-        if run_name:
-            label = run_name
-        else:
-            label = _label_from_checkpoint(ckpt, ep_id, dummy_mode)
-        episodes.append({"id": ep_id, "label": label, "timestamp": ts[:16],
-                         "total_steps": total_steps})
-    return episodes
-
-
-def load_env_metrics(conn: sqlite3.Connection, ep_id: int) -> dict:
+def load_run_names(conn: sqlite3.Connection, include: list[str] | None) -> list[str]:
     rows = conn.execute(
-        "SELECT step, bs_packets_received FROM env_step_metrics "
-        "WHERE episode_id=? ORDER BY step",
-        (ep_id,)
+        "SELECT DISTINCT run_name FROM episodes WHERE run_name IS NOT NULL ORDER BY run_name"
     ).fetchall()
-    steps = np.array([r[0] for r in rows])
-    bs_pkts = np.array([r[1] for r in rows])
-    return {"steps": steps, "bs_packets_received": bs_pkts}
+    names = [r[0] for r in rows]
+    if include:
+        names = [n for n in names if any(s in n for s in include)]
+    # Sort by preferred order, then alphabetically for unknowns
+    ordered = [n for n in _RUN_ORDER if n in names]
+    ordered += sorted(n for n in names if n not in _RUN_ORDER)
+    return ordered
 
 
-def load_agent_metrics(conn: sqlite3.Connection, ep_id: int) -> dict:
+def load_buffer_metrics(conn: sqlite3.Connection, run_name: str) -> dict:
+    """Mean DTN buffer packets per step, averaged across agents and episodes."""
+    rows = conn.execute("""
+        SELECT s.step, AVG(s.num_packets) as mean_pkts
+        FROM step_metrics s
+        JOIN episodes e ON s.episode_id = e.id
+        WHERE e.run_name = ?
+        GROUP BY s.step
+        ORDER BY s.step
+    """, (run_name,)).fetchall()
+
+    by_step: dict = {}
+    for step, mean_pkts in rows:
+        by_step[step] = mean_pkts or 0.0
+
+    # Also compute std across episodes for the same steps
+    std_rows = conn.execute("""
+        SELECT s.step, s.episode_id, AVG(s.num_packets) as ep_mean
+        FROM step_metrics s
+        JOIN episodes e ON s.episode_id = e.id
+        WHERE e.run_name = ?
+        GROUP BY s.step, s.episode_id
+        ORDER BY s.step
+    """, (run_name,)).fetchall()
+
+    by_step_ep: dict = {}
+    for step, _, ep_mean in std_rows:
+        by_step_ep.setdefault(step, []).append(ep_mean or 0.0)
+
+    steps = np.array(sorted(by_step_ep))
+    mean  = np.array([np.mean(by_step_ep[s]) for s in steps])
+    std   = np.array([np.std(by_step_ep[s])  for s in steps])
+    return {"steps": steps, "mean": mean, "std": std}
+
+
+def load_env_metrics(conn: sqlite3.Connection, run_name: str) -> dict:
     """
-    Returns per-step aggregates across all agents:
-      - total_goals:   sum of goals_completed across agents
-      - mean_buffer:   mean buffer_usage across agents
-      - mean_packets:  mean num_packets across agents
+    Returns per-step mean and std across all episodes for a given run_name.
+    Metrics: bs_unique_packets, bs_duplicate_packets, avg_datarate_mbps, bs_link_ratio.
     """
-    rows = conn.execute(
-        "SELECT step, SUM(goals_completed), AVG(buffer_usage), AVG(num_packets) "
-        "FROM step_metrics WHERE episode_id=? GROUP BY step ORDER BY step",
-        (ep_id,)
-    ).fetchall()
-    steps         = np.array([r[0] for r in rows])
-    total_goals   = np.array([r[1] for r in rows])
-    mean_buffer   = np.array([r[2] for r in rows])
-    mean_packets  = np.array([r[3] for r in rows])
-    return {"steps": steps, "total_goals": total_goals,
-            "mean_buffer": mean_buffer, "mean_packets": mean_packets}
+    rows = conn.execute("""
+        SELECT m.step,
+               m.bs_unique_packets,
+               m.bs_duplicate_packets,
+               m.avg_datarate_mbps,
+               m.bs_link_ratio
+        FROM env_step_metrics m
+        JOIN episodes e ON m.episode_id = e.id
+        WHERE e.run_name = ?
+        ORDER BY m.step
+    """, (run_name,)).fetchall()
 
+    by_step = defaultdict(lambda: {"unique": [], "dup": [], "dr": [], "ratio": []})
+    for step, unique, dup, dr, ratio in rows:
+        by_step[step]["unique"].append(unique or 0)
+        by_step[step]["dup"].append(dup or 0)
+        by_step[step]["dr"].append(dr or 0.0)
+        by_step[step]["ratio"].append(ratio or 0.0)
+
+    steps = np.array(sorted(by_step))
+    def _ms(key):
+        vals = [np.mean(by_step[s][key]) for s in steps]
+        stds = [np.std(by_step[s][key])  for s in steps]
+        return np.array(vals), np.array(stds)
+
+    unique_m, unique_s = _ms("unique")
+    dup_m,    dup_s    = _ms("dup")
+    dr_m,     dr_s     = _ms("dr")
+    ratio_m,  ratio_s  = _ms("ratio")
+
+    # Delivery efficiency = unique / (unique + duplicates), per step
+    total = unique_m + dup_m
+    eff_m = np.where(total > 0, unique_m / total * 100, np.nan)
+
+    return {
+        "steps":      steps,
+        "unique_m":   unique_m,   "unique_s":   unique_s,
+        "dup_m":      dup_m,      "dup_s":      dup_s,
+        "dr_m":       dr_m,       "dr_s":       dr_s,
+        "ratio_m":    ratio_m,    "ratio_s":    ratio_s,
+        "eff_m":      eff_m,
+    }
+
+
+def load_delivery_ratio(conn: sqlite3.Connection, run_name: str) -> dict:
+    """
+    Delivery ratio = bs_unique_packets / total packets generated (summed over all agents).
+    Standard DTN metric: fraction of generated packets that reached the BS uniquely.
+    """
+    # Total packets generated per episode per step (sum across agents)
+    gen_rows = conn.execute("""
+        SELECT s.episode_id, s.step, SUM(s.num_packets_generated) as gen
+        FROM step_metrics s
+        JOIN episodes e ON s.episode_id = e.id
+        WHERE e.run_name = ?
+        GROUP BY s.episode_id, s.step
+        ORDER BY s.step
+    """, (run_name,)).fetchall()
+
+    unique_rows = conn.execute("""
+        SELECT m.episode_id, m.step, m.bs_unique_packets
+        FROM env_step_metrics m
+        JOIN episodes e ON m.episode_id = e.id
+        WHERE e.run_name = ?
+        ORDER BY m.step
+    """, (run_name,)).fetchall()
+
+    gen_by    = defaultdict(dict)   # ep_id → step → gen
+    unique_by = defaultdict(dict)   # ep_id → step → unique
+    for ep_id, step, gen in gen_rows:
+        gen_by[ep_id][step] = gen or 0
+    for ep_id, step, u in unique_rows:
+        unique_by[ep_id][step] = u or 0
+
+    all_steps = sorted({s for ep in unique_by.values() for s in ep})
+    by_step = defaultdict(list)
+    for ep_id in unique_by:
+        for step in all_steps:
+            u = unique_by[ep_id].get(step, 0)
+            g = gen_by[ep_id].get(step, 0)
+            if g > 0:
+                by_step[step].append(u / g * 100)
+
+    steps  = np.array([s for s in all_steps if by_step[s]])
+    ratio_m = np.array([np.mean(by_step[s]) for s in steps])
+    ratio_s = np.array([np.std(by_step[s])  for s in steps])
+    return {"steps": steps, "ratio_m": ratio_m, "ratio_s": ratio_s}
+
+
+def load_episode_count(conn: sqlite3.Connection, run_name: str) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM episodes WHERE run_name=?", (run_name,)
+    ).fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Plotting helper
+# ---------------------------------------------------------------------------
+
+def _band(ax, steps, mean, std, colour, label, lw=2.0):
+    ax.plot(steps, mean, color=colour, label=label, linewidth=lw)
+    ax.fill_between(steps, mean - std, mean + std, color=colour, alpha=0.18)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--db",  default=DEFAULT_DB)
     parser.add_argument("--out", default=DEFAULT_OUT)
     parser.add_argument("--include", nargs="+", metavar="SUBSTR",
-                        help="Only plot episodes whose run_name contains any of these substrings")
+                        help="Only plot runs whose name contains any of these substrings")
     args = parser.parse_args()
 
-    conn     = sqlite3.connect(args.db)
-    episodes = load_episodes(conn)
-    if args.include:
-        episodes = [ep for ep in episodes
-                    if any(s in ep["label"] for s in args.include)]
-    if not episodes:
-        print("No episodes found in database.")
+    conn      = sqlite3.connect(args.db)
+    run_names = load_run_names(conn, args.include)
+    if not run_names:
+        print("No runs found — check --db path or --include filter.")
         return
 
-    colours = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    colours = _COLOURS + plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
-    fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=False)
-    ax_bs, ax_goals, ax_buf = axes
+    fig, axes = plt.subplots(3, 2, figsize=(13, 13))
+    ax_uniq  = axes[0, 0]   # BS unique packets (primary metric)
+    ax_ratio = axes[0, 1]   # Delivery ratio (unique / generated) ← key DTN metric
+    ax_eff   = axes[1, 0]   # Delivery efficiency (unique / total received)
+    ax_buf   = axes[1, 1]   # DTN buffer packets
+    ax_dup   = axes[2, 0]   # Duplicate packets
+    ax_link  = axes[2, 1]   # BS link ratio (navigation-dependent, same for all A* runs)
 
-    for i, ep in enumerate(episodes):
-        col   = colours[i % len(colours)]
-        label = ep["label"]
+    for idx, run_name in enumerate(run_names):
+        col   = colours[idx % len(colours)]
+        n_eps = load_episode_count(conn, run_name)
+        label = _RUN_LABELS.get(run_name, run_name) + f"  (n={n_eps})"
 
-        env_m   = load_env_metrics(conn, ep["id"])
-        agent_m = load_agent_metrics(conn, ep["id"])
+        env  = load_env_metrics(conn, run_name)
+        dr_m = load_delivery_ratio(conn, run_name)
+        buf  = load_buffer_metrics(conn, run_name)
 
-        # ── BS packets received ───────────────────────────────────────────
-        ax_bs.plot(env_m["steps"], env_m["bs_packets_received"],
-                   color=col, label=label, linewidth=1.8)
-
-        # ── Total goals reached ───────────────────────────────────────────
-        ax_goals.plot(agent_m["steps"], agent_m["total_goals"],
-                      color=col, label=label, linewidth=1.8)
-
-        # ── Buffer (mean packets in buffer + mean buffer usage %) ─────────
-        ax_buf.plot(agent_m["steps"], agent_m["mean_packets"],
-                    color=col, label=label, linewidth=1.8, linestyle="-")
-        ax_buf.plot(agent_m["steps"], agent_m["mean_buffer"] * 100,
-                    color=col, linewidth=1.0, linestyle="--", alpha=0.5)
+        _band(ax_uniq,  env["steps"],  env["unique_m"], env["unique_s"],  col, label)
+        _band(ax_ratio, dr_m["steps"], dr_m["ratio_m"], dr_m["ratio_s"], col, label)
+        _band(ax_eff,   env["steps"],  env["eff_m"],    np.zeros_like(env["eff_m"]), col, label)
+        _band(ax_buf,   buf["steps"],  buf["mean"],     buf["std"],       col, label)
+        _band(ax_dup,   env["steps"],  env["dup_m"],    env["dup_s"],     col, label)
+        _band(ax_link,  env["steps"],  env["ratio_m"] * 100, env["ratio_s"] * 100, col, label)
 
     conn.close()
 
-    # ── Formatting ────────────────────────────────────────────────────────
-    ax_bs.set_title("Base Station — Packets Received (cumulative)", fontweight="bold")
-    ax_bs.set_ylabel("Packets")
-    ax_bs.legend(fontsize=8, loc="upper left")
-    ax_bs.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-    ax_bs.grid(True, alpha=0.3)
+    # ── Titles / labels ───────────────────────────────────────────────────
+    def _fmt(ax, title, ylabel, pct=False, integer=False):
+        ax.set_title(title, fontweight="bold", fontsize=10)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel("Step")
+        ax.legend(fontsize=7.5)
+        ax.grid(True, alpha=0.3)
+        if pct:
+            ax.set_ylim(bottom=0)
+            ax.yaxis.set_major_formatter(ticker.PercentFormatter(decimals=0))
+        elif integer:
+            ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
 
-    ax_goals.set_title("Goals Reached (all agents combined)", fontweight="bold")
-    ax_goals.set_ylabel("Total goals completed")
-    ax_goals.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-    ax_goals.legend(fontsize=8, loc="upper left")
-    ax_goals.grid(True, alpha=0.3)
+    _fmt(ax_uniq,  "BS Unique Packets (cumulative)",               "Unique packets",   integer=True)
+    _fmt(ax_ratio, "Delivery Ratio  [key DTN metric]\n"
+                   "BS unique / packets generated",                "% delivered",      pct=True)
+    _fmt(ax_eff,   "Delivery Efficiency\nunique / (unique + duplicates)", "% unique", pct=True)
+    _fmt(ax_buf,   "DTN Buffer — mean packets per agent",          "Packets in buffer")
+    _fmt(ax_dup,   "Duplicate Packets at BS (cumulative)",         "Duplicates",       integer=True)
+    _fmt(ax_link,  "BS Link Ratio\n(navigation-dependent — identical for all A* runs)",
+                   "% agents at BS",  pct=True)
 
-    ax_buf.set_title("DTN Buffer  —  mean packets (solid) · mean usage % (dashed)",
-                     fontweight="bold")
-    ax_buf.set_ylabel("Packets  /  Usage %")
-    ax_buf.legend(fontsize=8, loc="upper left")
-    ax_buf.grid(True, alpha=0.3)
-    ax_buf.set_xlabel("Step")
-
-    fig.suptitle("PPO Evaluation Comparison", fontsize=13, fontweight="bold", y=1.01)
+    n_str = ", ".join(run_names)
+    fig.suptitle(f"Algorithm Comparison — {n_str}", fontsize=12, fontweight="bold")
     fig.tight_layout()
     fig.savefig(args.out, dpi=150, bbox_inches="tight")
     print(f"Saved → {args.out}")

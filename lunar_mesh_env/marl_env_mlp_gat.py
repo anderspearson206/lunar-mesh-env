@@ -80,20 +80,30 @@ class LunarRoverMeshMLPGATEnv(LunarRoverMeshEnv):
 
         return node_feats, adj
 
+    def _peer_targets_from_flags(self, agent, agent_id, comm_flags_peer):
+        """Graph order: other rovers sorted by ue_id, self excluded."""
+        others = sorted(
+            (self.agent_map[a] for a in self.possible_agents if a != agent_id),
+            key=lambda a: a.ue_id,
+        )
+        return [others[i] for i, f in enumerate(comm_flags_peer)
+                if f == 1 and others[i] in agent.neighbors]
+
     def _get_obs(self, agent_id):
         agent    = self.agent_map[agent_id]
         obs_dict = agent.get_local_observation(list(self.agent_map.values()))
 
-        # Action mask (identical logic to parent)
+        # Action mask — comm targets: other rovers (ue_id order, self excluded) then BS.
+        # No self-slot: action space is [9, 2*(N-1), 2] = [9,2,2,2] for 3 agents.
         move_mask  = self._compute_move_mask(agent)
         comm_masks = []
-        for target_id in self.possible_agents:
-            if target_id == agent_id:
-                comm_masks.append([1, 1])
-                continue
-            target_rover = self.agent_map[target_id]
+        others = sorted(
+            (self.agent_map[a] for a in self.possible_agents if a != agent_id),
+            key=lambda a: a.ue_id,
+        )
+        for other in others:
             rssi = self.radio_model.get_signal_strength(
-                agent.x, agent.y, target_rover.x, target_rover.y
+                agent.x, agent.y, other.x, other.y
             )
             comm_masks.append([1, 1] if rssi > self.MIN_DBM_THRESHOLD else [1, 0])
         rssi_bs = self.radio_model.get_signal_strength(
@@ -122,7 +132,8 @@ class LunarRoverMeshMLPGATEnv(LunarRoverMeshEnv):
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
         num_rovers = len(self.possible_agents)
-        mask_dim   = 9 + (num_rovers + 1) * 2
+        # comm targets: (num_rovers-1) peers + BS = num_rovers targets, no self-slot
+        mask_dim   = 9 + num_rovers * 2
         MAX_NODES  = num_rovers + 1
 
         return spaces.Dict({
@@ -135,3 +146,10 @@ class LunarRoverMeshMLPGATEnv(LunarRoverMeshEnv):
             "other_agent_connectivity": spaces.Box(0, 1,      shape=(num_rovers + 1,),       dtype=np.float32),
             "position":                 spaces.Box(0, 256,    shape=(2,),                    dtype=np.float32),
         })
+
+    @functools.lru_cache(maxsize=None)
+    def action_space(self, _agent):
+        # [movement(9)] + [comm_peer(2)] * (num_rovers-1) + [comm_BS(2)]
+        # = num_rovers comm targets total (self excluded)
+        num_rovers = len(self.possible_agents)
+        return spaces.MultiDiscrete([9] + [2] * num_rovers)

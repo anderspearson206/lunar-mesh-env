@@ -28,6 +28,7 @@ import imageio
 
 import ray
 from ray.rllib.algorithms.ppo import PPOConfig
+from ray.rllib.algorithms.dqn import DQNConfig
 from ray.rllib.models import ModelCatalog
 from ray.tune.registry import register_env
 from ray.rllib.env.wrappers.pettingzoo_env import ParallelPettingZooEnv
@@ -39,12 +40,34 @@ if _REPO_ROOT not in sys.path:
 from lunar_mesh_env import LunarRoverMeshEnv, RadioMapModelNN
 from lunar_mesh_env.marl_env_mlp_gat import LunarRoverMeshMLPGATEnv
 from lunar_mesh_env.marl_env_radio import LunarRoverMeshRadioEnv
+from lunar_mesh_env.marl_env_shared_reward import LunarRoverMeshSharedRewardEnv
+from lunar_mesh_env.marl_env_forward_reward import LunarRoverMeshForwardRewardEnv
+from lunar_mesh_env.marl_env_eps_comm import LunarRoverMeshEpsCommEnv
+from lunar_mesh_env.marl_env_touched_reward import LunarRoverMeshTouchedRewardEnv
+from lunar_mesh_env.marl_env_touched_eps_comm import LunarRoverMeshTouchedEpsCommEnv
+from lunar_mesh_env.marl_env_astar_comm import LunarRoverMeshAStarCommEnv
+from lunar_mesh_env.marl_env_astar_eps_comm import LunarRoverMeshAStarEpsCommEnv
+from lunar_mesh_env.marl_env_astar_forward_reward import LunarRoverMeshAStarForwardRewardEnv
+from lunar_mesh_env.marl_env_lozano import LunarRoverMeshLozanoEnv
 from lunar_mesh_env.radio_model_lookup import RadioMapModelLookup
 from models.action_mask_model import TorchActionMaskModel
 from models.mlp_gat_model import TorchMLPGATModel
 from models.mlp_gat_radio_model import TorchMLPGATRadioModel
+from models.mlp_gat_lozano_model import TorchMLPGATLozanoModel
 
-_RADIO_MODES = {"radio_rssi": "rssi", "radio_crop": "crop", "radio_full": "full"}
+_RADIO_MODES    = {"radio_rssi": "rssi", "radio_crop": "crop", "radio_full": "full"}
+_MLPGAT_SUBENVS = {
+    "shared_reward":    LunarRoverMeshSharedRewardEnv,
+    "forward_reward":   LunarRoverMeshForwardRewardEnv,
+    "eps_comm":         LunarRoverMeshEpsCommEnv,
+    "touched_reward":   LunarRoverMeshTouchedRewardEnv,
+    "touched_eps_comm": LunarRoverMeshTouchedEpsCommEnv,
+    "astar_comm":       LunarRoverMeshAStarCommEnv,
+    "astar_eps_comm":          LunarRoverMeshAStarEpsCommEnv,
+    "astar_forward_reward":    LunarRoverMeshAStarForwardRewardEnv,
+}
+
+_LOZANO_SUBENVS = {"lozano": LunarRoverMeshLozanoEnv}
 
 DEFAULT_MAPS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "radio_maps_hm_18.npy")
@@ -64,6 +87,7 @@ MODEL_PATHS = {
 RAY_RESULTS_DIR = os.path.expanduser("~/ray_results")
 NUM_AGENTS      = 3
 MAX_STEPS       = 250
+EVAL_SEED       = 199
 DEFAULT_DB      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_metrics_real_maps_3.db")
 
 
@@ -97,6 +121,25 @@ def env_creator(config):
             radio_model=radio_model,
             num_agents=config.get("num_agents", NUM_AGENTS),
             radio_obs=_RADIO_MODES[model_type],
+            render_mode="rgb_array",
+            seed=19,
+        )
+    elif model_type in _LOZANO_SUBENVS:
+        raw_env = LunarRoverMeshLozanoEnv(
+            hm_path=config.get("hm_path", HM_PATH),
+            radio_model=radio_model,
+            num_agents=config.get("num_agents", NUM_AGENTS),
+            packet_mode='rate',
+            action_type=config.get("action_type", "multidiscrete"),
+            render_mode="rgb_array",
+            seed=19,
+        )
+    elif model_type in _MLPGAT_SUBENVS:
+        env_cls = _MLPGAT_SUBENVS[model_type]
+        raw_env = env_cls(
+            hm_path=config.get("hm_path", HM_PATH),
+            radio_model=radio_model,
+            num_agents=config.get("num_agents", NUM_AGENTS),
             render_mode="rgb_array",
             seed=19,
         )
@@ -247,7 +290,22 @@ def collect_agent_metrics(env: LunarRoverMeshEnv, agent_id: str,
 
 def collect_env_metrics(env: LunarRoverMeshEnv, step: int, episode_id: int) -> tuple:
     active = env.agents
-    avg_dr = float(np.mean([env.agent_map[a].current_datarate for a in active])) if active else 0.0
+    bs = env.base_station
+    # current_datarate is only set by the old route-finder, not by A*/Lozano env.
+    # Compute actual link rate from the radio model instead.
+    dr_vals = []
+    for a in active:
+        agent = env.agent_map[a]
+        if agent.bs_connected:
+            dr_vals.append(env.radio_model.get_throughput_pos(
+                agent.x, agent.y, bs.x, bs.y))
+        elif agent.neighbors:
+            dr_vals.append(max(
+                env.radio_model.get_throughput_pos(agent.x, agent.y, n.x, n.y)
+                for n in agent.neighbors))
+        else:
+            dr_vals.append(0.0)
+    avg_dr = float(np.mean(dr_vals)) if dr_vals else 0.0
     bs_links = sum(1 for a in active if env.agent_map[a].bs_connected)
     bs_ratio = bs_links / len(active) if active else 0.0
     bs = env.base_station
@@ -285,9 +343,26 @@ def main():
                         help="Use analytic radio model. Ignored when --lookup-maps is set.")
     parser.add_argument("--no-dummy-mode", dest="dummy_mode", action="store_false")
     parser.add_argument("--model",
-                        choices=["mlp", "mlp_gat", "radio_rssi", "radio_crop", "radio_full"],
+                        choices=["mlp", "mlp_gat",
+                                 "radio_rssi", "radio_crop", "radio_full",
+                                 "shared_reward", "forward_reward", "eps_comm",
+                                 "touched_reward", "touched_eps_comm",
+                                 "astar_comm", "astar_eps_comm",
+                                 "astar_forward_reward",
+                                 "lozano"],
                         default="mlp",
                         help="Policy architecture to evaluate (default: mlp)")
+    parser.add_argument("--routing", default="none",
+                        choices=["none", "epidemic", "spray_and_wait"],
+                        help="Override comm decisions with a routing protocol (default: none)")
+    parser.add_argument("--spray-copies", type=int, default=4,
+                        help="Max copies for spray_and_wait (default: 4)")
+    parser.add_argument("--routing-bw-limit", action="store_true", default=False,
+                        help="Constrain epidemic to actual link rate (Vahdat 802.11 model)")
+    parser.add_argument("--episodes", type=int, default=1,
+                        help="Number of evaluation episodes (default: 1)")
+    parser.add_argument("--algo", choices=["ppo", "dqn"], default="ppo",
+                        help="Algorithm that produced the checkpoint (default: ppo)")
     args = parser.parse_args()
 
     # Auto-detect lookup maps if not specified but default file exists
@@ -300,20 +375,26 @@ def main():
     print(f"Loading checkpoint: {checkpoint}")
     print(f"Model type: {args.model}")
 
-    ModelCatalog.register_custom_model("action_mask_model",    TorchActionMaskModel)
-    ModelCatalog.register_custom_model("mlp_gat_model",        TorchMLPGATModel)
-    ModelCatalog.register_custom_model("mlp_gat_radio_model",  TorchMLPGATRadioModel)
+    ModelCatalog.register_custom_model("action_mask_model",      TorchActionMaskModel)
+    ModelCatalog.register_custom_model("mlp_gat_model",          TorchMLPGATModel)
+    ModelCatalog.register_custom_model("mlp_gat_radio_model",    TorchMLPGATRadioModel)
+    ModelCatalog.register_custom_model("mlp_gat_lozano_model",   TorchMLPGATLozanoModel)
     register_env("lunar_mesh_v1", env_creator)
     ray.init(ignore_reinit_error=True, num_gpus=0)
 
+    lozano_action_type = "discrete" if args.algo == "dqn" else "multidiscrete"
     env_config = {"num_agents": NUM_AGENTS, "hm_path": HM_PATH,
                   "maps_path": maps_path, "dummy_mode": args.dummy_mode,
-                  "model_type": args.model}
+                  "model_type": args.model,
+                  "action_type": lozano_action_type}
 
     if args.model in _RADIO_MODES:
         custom_model      = "mlp_gat_radio_model"
         extra_model_cfg   = {"custom_model_config": {"radio_mode": _RADIO_MODES[args.model]}}
-    elif args.model == "mlp_gat":
+    elif args.model in _LOZANO_SUBENVS:
+        custom_model      = "mlp_gat_lozano_model"
+        extra_model_cfg   = {}
+    elif args.model in ("mlp_gat", *_MLPGAT_SUBENVS):
         custom_model      = "mlp_gat_model"
         extra_model_cfg   = {}
     else:
@@ -325,18 +406,13 @@ def main():
     act_space = probe.action_space
     probe.close()
 
-    algo = (
-        PPOConfig()
+    base_cfg = (
+        (DQNConfig() if args.algo == "dqn" else PPOConfig())
         .environment("lunar_mesh_v1", env_config=env_config)
         .framework("torch")
         .api_stack(
             enable_rl_module_and_learner=False,
             enable_env_runner_and_connector_v2=False,
-        )
-        .training(
-            model={"custom_model": custom_model,
-                   "_disable_preprocessor_api": True,
-                   **extra_model_cfg},
         )
         .multi_agent(
             policies={"shared_policy": (None, obs_space, act_space, {})},
@@ -344,128 +420,162 @@ def main():
         )
         .env_runners(num_env_runners=0)
         .resources(num_gpus=0)
-        .build()
     )
+    model_cfg = {"custom_model": custom_model,
+                 "_disable_preprocessor_api": True,
+                 **extra_model_cfg}
+    if args.algo == "dqn":
+        base_cfg = base_cfg.training(
+            model=model_cfg,
+            hiddens=[],
+            replay_buffer_config={"type": "MultiAgentPrioritizedReplayBuffer"},
+        )
+    else:
+        base_cfg = base_cfg.training(model=model_cfg)
+    algo = base_cfg.build()
     algo.restore(checkpoint)
     policy = algo.get_policy("shared_policy")
     print("Policy restored.")
 
-    # ── Build raw env for eval ────────────────────────────────────────────
+    # ── Init DB ───────────────────────────────────────────────────────────
+    conn = init_db(args.db)
+
+    # ── Multi-episode eval loop ───────────────────────────────────────────
     hm = np.load(HM_PATH)
     radio_model = _build_radio_model(hm, maps_path=maps_path, dummy_mode=args.dummy_mode)
 
-    if args.model in _RADIO_MODES:
-        env = LunarRoverMeshRadioEnv(
-            hm_path=HM_PATH,
-            radio_model=radio_model,
-            num_agents=NUM_AGENTS,
-            radio_obs=_RADIO_MODES[args.model],
-            render_mode="rgb_array",
-            seed=199,
-        )
-    elif args.model == "mlp_gat":
-        env = LunarRoverMeshMLPGATEnv(
-            hm_path=HM_PATH,
-            radio_model=radio_model,
-            num_agents=NUM_AGENTS,
-            render_mode="rgb_array",
-            seed=199,
-        )
-    else:
-        env = LunarRoverMeshEnv(
-            hm_path=HM_PATH,
-            radio_model=radio_model,
-            num_agents=NUM_AGENTS,
-            render_mode="rgb_array",
-            seed=199,
-        )
-
-    # ── Init DB ───────────────────────────────────────────────────────────
-    conn = init_db(args.db)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO episodes (timestamp, checkpoint, num_agents, dummy_mode, seed, run_name) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (datetime.datetime.now().isoformat(), checkpoint, NUM_AGENTS,
-         int(args.dummy_mode), 19, args.name),
+    _routing_kwargs = dict(
+        routing_protocol=args.routing,
+        spray_copies=args.spray_copies,
+        routing_bw_limit=args.routing_bw_limit,
     )
-    conn.commit()
-    episode_id = cur.lastrowid
-    print(f"Episode ID {episode_id} → {args.db}")
 
-    # ── Eval loop ─────────────────────────────────────────────────────────
-    obs, _ = env.reset()
-    frames = []
-    total_rewards = {aid: 0.0 for aid in env.possible_agents}
-    agent_rows = []
-    env_rows   = []
+    seeds = [EVAL_SEED + i for i in range(args.episodes)]
+    print(f"Running {args.episodes} episode(s), seeds {seeds[0]}..{seeds[-1]}")
 
-    print(f"Running {args.steps} steps...")
-    for step in range(args.steps):
-        actions = {}
-        for agent_id in env.agents:
-            action, _, _ = policy.compute_single_action(
-                obs[agent_id],
-                policy_id="shared_policy",
-                explore=False,
+    packets_per_ep = []
+
+    def _make_env(seed):
+        if args.model in _RADIO_MODES:
+            return LunarRoverMeshRadioEnv(
+                hm_path=HM_PATH, radio_model=radio_model, num_agents=NUM_AGENTS,
+                radio_obs=_RADIO_MODES[args.model], render_mode="rgb_array",
+                seed=seed, **_routing_kwargs,
             )
-            actions[agent_id] = action
-            if step == 0:
-                mask = obs[agent_id]["action_mask"]
-                print(f"  [{agent_id}] move mask: {mask[:9]}  action: {action}")
-
-        obs, rewards, terms, truncs, _ = env.step(actions)
-
-        for aid, r in rewards.items():
-            total_rewards[aid] += r
-            agent_rows.append(
-                collect_agent_metrics(env, aid, step, r, total_rewards[aid], episode_id)
+        elif args.model in _LOZANO_SUBENVS:
+            return LunarRoverMeshLozanoEnv(
+                hm_path=HM_PATH, radio_model=radio_model, num_agents=NUM_AGENTS,
+                packet_mode='rate', action_type=lozano_action_type,
+                render_mode="rgb_array", seed=seed, **_routing_kwargs,
+            )
+        elif args.model in _MLPGAT_SUBENVS:
+            env_cls = _MLPGAT_SUBENVS[args.model]
+            return env_cls(
+                hm_path=HM_PATH, radio_model=radio_model, num_agents=NUM_AGENTS,
+                render_mode="rgb_array", seed=seed, **_routing_kwargs,
+            )
+        elif args.model == "mlp_gat":
+            return LunarRoverMeshMLPGATEnv(
+                hm_path=HM_PATH, radio_model=radio_model, num_agents=NUM_AGENTS,
+                render_mode="rgb_array", seed=seed, **_routing_kwargs,
+            )
+        else:
+            return LunarRoverMeshEnv(
+                hm_path=HM_PATH, radio_model=radio_model, num_agents=NUM_AGENTS,
+                render_mode="rgb_array", seed=seed, **_routing_kwargs,
             )
 
-        env_rows.append(collect_env_metrics(env, step, episode_id))
+    for ep_idx, seed in enumerate(seeds):
+        env = _make_env(seed)
 
-        frame = env.render()
-        if frame is not None:
-            frames.append(frame)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO episodes (timestamp, checkpoint, num_agents, dummy_mode, seed, run_name) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (datetime.datetime.now().isoformat(), checkpoint, NUM_AGENTS,
+             int(args.dummy_mode), seed, args.name),
+        )
+        conn.commit()
+        episode_id = cur.lastrowid
+        print(f"\nEpisode {ep_idx + 1}/{args.episodes}  seed={seed}  episode_id={episode_id}")
 
-        if step % 20 == 0:
-            reward_str = "  ".join(
-                f"{aid}: {total_rewards[aid]:.1f}" for aid in env.possible_agents
-            )
-            print(f"  step {step:>4}  |  cumulative rewards: {reward_str}"
-                  f"  |  BS pkts: {env.base_station.num_packets_received}")
+        obs, _ = env.reset()
+        frames = []
+        total_rewards = {aid: 0.0 for aid in env.possible_agents}
+        agent_rows = []
+        env_rows   = []
 
-        if all(terms.values()) or all(truncs.values()):
-            print(f"Episode finished at step {step}.")
-            break
+        print(f"Running {args.steps} steps...")
+        for step in range(args.steps):
+            actions = {}
+            for agent_id in env.agents:
+                action, _, _ = policy.compute_single_action(
+                    obs[agent_id],
+                    policy_id="shared_policy",
+                    explore=False,
+                )
+                actions[agent_id] = action
+                if step == 0 and ep_idx == 0:
+                    mask = obs[agent_id]["action_mask"]
+                    print(f"  [{agent_id}] move mask: {mask[:9]}  action: {action}")
 
-    # ── Write metrics to DB ───────────────────────────────────────────────
-    conn.executemany(
-        "INSERT INTO step_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        agent_rows,
-    )
-    conn.executemany(
-        "INSERT INTO env_step_metrics VALUES (?,?,?,?,?,?,?,?,?)",
-        env_rows,
-    )
-    cur.execute("UPDATE episodes SET total_steps=? WHERE id=?", (step + 1, episode_id))
-    conn.commit()
+            obs, rewards, terms, truncs, _ = env.step(actions)
+
+            for aid, r in rewards.items():
+                total_rewards[aid] += r
+                agent_rows.append(
+                    collect_agent_metrics(env, aid, step, r, total_rewards[aid], episode_id)
+                )
+
+            env_rows.append(collect_env_metrics(env, step, episode_id))
+
+            if ep_idx == 0:
+                frame = env.render()
+                if frame is not None:
+                    frames.append(frame)
+
+            if step % 20 == 0:
+                reward_str = "  ".join(
+                    f"{aid}: {total_rewards[aid]:.1f}" for aid in env.possible_agents
+                )
+                print(f"  step {step:>4}  |  cumulative rewards: {reward_str}"
+                      f"  |  BS pkts: {env.base_station.num_packets_received}")
+
+            if all(terms.values()) or all(truncs.values()):
+                print(f"Episode finished at step {step}.")
+                break
+
+        packets_per_ep.append(env.base_station.num_packets_received)
+
+        conn.executemany(
+            "INSERT INTO step_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            agent_rows,
+        )
+        conn.executemany(
+            "INSERT INTO env_step_metrics VALUES (?,?,?,?,?,?,?,?,?)",
+            env_rows,
+        )
+        cur.execute("UPDATE episodes SET total_steps=? WHERE id=?", (step + 1, episode_id))
+        conn.commit()
+        print(f"  BS unique packets: {env.base_station.num_packets_received}  "
+              f"episode_id={episode_id}")
+
+        if ep_idx == 0 and frames:
+            gif_path = f"{args.out}.gif"
+            imageio.mimsave(gif_path, frames, fps=4)
+            print(f"  GIF saved → {gif_path}")
+
+        env.close()
+
     conn.close()
-    print(f"Metrics saved → {args.db}  (episode_id={episode_id})")
-
-    env.close()
     algo.stop()
     ray.shutdown()
 
-    # ── Save video ────────────────────────────────────────────────────────
-    if frames:
-        gif_path = f"{args.out}.gif"
-        imageio.mimsave(gif_path, frames, fps=4)
-        print(f"Saved {gif_path}")
-
-    print("\nFinal cumulative rewards:")
-    for aid, r in total_rewards.items():
-        print(f"  {aid}: {r:.2f}")
+    # ── Summary ───────────────────────────────────────────────────────────
+    print(f"\nMetrics saved → {args.db}")
+    if len(packets_per_ep) > 1:
+        print(f"BS unique packets: {np.mean(packets_per_ep):.1f} ± {np.std(packets_per_ep):.1f}"
+              f"  over {args.episodes} episodes")
 
 
 if __name__ == "__main__":

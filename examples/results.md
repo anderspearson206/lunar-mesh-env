@@ -66,3 +66,28 @@ coverage_map — a 256×256 running-max dBm grid, seeded at reset from the BS ra
 _compute_coverage_reward() — after every move, reads each agent's current radio map (cache hit since generate_map_batch just ran), updates the max, and splits the reward for newly illuminated pixels equally across active agents.
 REWARD_COVERAGE_PER_PIXEL = 0.001 — at 1000 newly covered pixels, this gives +1.0 reward, comparable in scale to the distance shaping reward. Tune up if coverage exploration feels too weak.
 The reward naturally decays to zero as the map saturates, so it acts as an exploration bonus early in training without dominating late-episode behavior.
+
+# Plan for continous PPO output
+/home/paolo/.claude/plans/how-would-you-train-streamed-milner.md
+
+# Lozano
+/home/paolo/ray_results/lozano_ppo/PPO_lunar_mesh_lozano_v1_9fc57_00000_0_2026-07-01_14-05-44/checkpoint_000000
+
+/home/paolo/ray_results/lozano_ddqn/DQN_lunar_mesh_lozano_v1_a58a1_00000_0_2026-07-01_20-10-58/checkpoint_000000
+
+# Evaluate a trained Lozano PPO checkpoint
+conda run -n lunar_mesh python examples/eval_ppo_checkpoint.py \
+    --checkpoint ~/ray_results/lozano_ppo/PPO_.../checkpoint_XXXXXX \
+    --model lozano --name lozano_ppo_eval --out lozano_ppo
+
+# BW-constrained epidemic (Vahdat baseline — apples-to-apples)
+conda run -n lunar_mesh python examples/eval_ppo_checkpoint.py \
+    --checkpoint ~/ray_results/lozano_ppo/PPO_.../checkpoint_XXXXXX \
+    --model lozano --routing epidemic --routing-bw-limit \
+    --name epidemic_bw --out epidemic_bw
+
+# Unconstrained epidemic (absolute upper bound, ~400 packets)
+conda run -n lunar_mesh python examples/eval_ppo_checkpoint.py \
+    --checkpoint ~/ray_results/lozano_ppo/PPO_.../checkpoint_XXXXXX \
+    --model lozano --routing epidemic \
+    --name epidemic_unlimited --out epidemic_unlimited

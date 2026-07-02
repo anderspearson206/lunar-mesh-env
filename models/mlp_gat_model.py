@@ -2,7 +2,7 @@
 Hybrid MLP-GAT policy model for RLlib (old API stack).
 
 Movement decisions (9 logits) come from an MLP over scalar features.
-Communication decisions (8 logits = 4 targets × 2) come from a GAT over
+Communication decisions (6 logits = 3 targets × 2) come from a GAT over
 the local agent-BS graph.  Both branches share a value head.
 
 Architecture:
@@ -10,18 +10,24 @@ Architecture:
   GAT branch  : node_features(N,7) + adj(N,N) →
                   GATLayer(7→128, heads=4, concat) + ELU →
                   GATLayer(128→64, heads=1, mean)  + ELU →
-                  focal_embed(64) → comm_logits(8)
+                  per_node_comm_head(64→2) applied to nodes[1:] →
+                  comm_logits(6)          [node 0 = self, excluded from output]
   Value head  : cat(mlp_hidden(256), focal_embed(64)) → Linear(320,1)
-  Output      : cat(move_logits(9), comm_logits(8)) = 17 logits + action mask
+  Output      : cat(move_logits(9), comm_logits(6)) = 15 logits + action mask
 
-Flat obs layout (alphabetical key order, total 61 dims):
-  [0:17]  action_mask                (17,)
-  [17:19] goal_vector                (2,)
-  [19:23] graph_adj                  (4,)
-  [23:51] graph_node_features        (4×7 = 28,)
-  [51:55] move_history               (4,)
-  [55:59] other_agent_connectivity   (4,)
-  [59:61] position                   (2,)
+Comm logit ordering matches action space (self excluded, others sorted by ue_id then BS):
+  comm_logits[0:2]  → other_rover_0 (graph node 1)
+  comm_logits[2:4]  → other_rover_1 (graph node 2)
+  comm_logits[4:6]  → base station  (graph node 3)
+
+Flat obs layout (alphabetical key order, total 59 dims):
+  [0:15]  action_mask                (15,)
+  [15:17] goal_vector                (2,)
+  [17:21] graph_adj                  (4,)
+  [21:49] graph_node_features        (4×7 = 28,)
+  [49:53] move_history               (4,)
+  [53:57] other_agent_connectivity   (4,)
+  [57:59] position                   (2,)
 """
 
 import numpy as np
@@ -139,7 +145,9 @@ class TorchMLPGATModel(TorchModelV2, nn.Module):
         self.gat1 = GATLayer(NODE_FEAT_DIM, 32, num_heads=4, concat=True,  dropout=0.2)
         self.gat2 = GATLayer(128,            64, num_heads=1, concat=False, dropout=0.2)
         self.elu  = nn.ELU()
-        self.comm_head = nn.Linear(64, 8)
+        # Shared binary head applied independently to each non-self node embedding.
+        # Logit ordering: [other_0, other_1, BS] × 2 = 6 comm logits.
+        self.comm_head = nn.Linear(64, 2)
 
         # ── Value head ───────────────────────────────────────────────────
         self.value_head = nn.Linear(256 + 64, 1)
@@ -214,12 +222,13 @@ class TorchMLPGATModel(TorchModelV2, nn.Module):
         mlp_hidden  = self.mlp(scalars)             # (B, 256)
         move_logits = self.move_head(mlp_hidden)    # (B, 9)
 
-        # ── GAT branch: graph → focal embedding → comm logits ─────────
+        # ── GAT branch: graph → per-node embeddings → comm logits ────
         adj  = self._build_adj(adj_1d)              # (B, N, N)
         h    = self.elu(self.gat1(nf,  adj))        # (B, N, 128)
         h    = self.elu(self.gat2(h,   adj))        # (B, N, 64)
         focal_embed = h[:, 0, :]                    # (B, 64) — self is always node 0
-        comm_logits = self.comm_head(focal_embed)   # (B, 8)
+        # Apply shared comm head to each non-self node; logit order matches action space.
+        comm_logits = self.comm_head(h[:, 1:, :]).reshape(h.shape[0], -1)  # (B, (N-1)*2)
 
         # ── Value head: fuse both branches ────────────────────────────
         self._current_value = self.value_head(

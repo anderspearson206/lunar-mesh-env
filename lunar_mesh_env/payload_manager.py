@@ -11,13 +11,14 @@ class Packet:
         self.packet_id = f"P_{Packet.counter}"
         Packet.counter += 1
         self.size = size
-        self.gen_step = gen_step  
+        self.gen_step = gen_step
         self.time_to_live = time_to_live
         self.source = source
         self.destination = destination
         self.origin_x = origin_x
         self.origin_y = origin_y
         self.touched = {source}
+        self.copies = 1  # spray-and-wait token count; 1 = wait mode (no further spraying)
 
 
 class PayloadManager:
@@ -121,14 +122,16 @@ class PayloadManager:
         self.buffer.append(packet)
         self.payload_size += packet.size
 
-    def generate_packet(self, size, time_to_live, destination, current_step, origin_x, origin_y):
+    def generate_packet(self, size, time_to_live, destination, current_step, origin_x, origin_y,
+                        spray_copies: int = 1):
         while size + self.payload_size > self.buffer_size:
             packet = self.buffer.popleft()
             self.payload_size -= packet.size
-        
-        packet = Packet(source=self.id, destination=destination, size=size, 
-                        time_to_live=time_to_live, gen_step=current_step, 
+
+        packet = Packet(source=self.id, destination=destination, size=size,
+                        time_to_live=time_to_live, gen_step=current_step,
                         origin_x=origin_x, origin_y=origin_y)
+        packet.copies = spray_copies
         self.buffer.append(packet)
         self.payload_size += size
         self.num_packets_generated += 1
@@ -140,5 +143,36 @@ class PayloadManager:
             "num_packets": len(self.buffer),
             "num_packets_generated": self.num_packets_generated
         }
-        
-    
+
+    def epidemic_forward(self, target: 'PayloadManager') -> int:
+        """Copy all held packets to target that it does not already have.
+
+        The sender keeps its own copy (true epidemic replication).
+        """
+        target_ids = {p.packet_id for p in target.buffer}
+        forwarded = 0
+        for packet in self.buffer:
+            if packet.packet_id not in target_ids:
+                target.receive_packet(packet)
+                forwarded += 1
+        return forwarded
+
+    def spray_forward(self, target: 'PayloadManager') -> int:
+        """Spray-and-wait: split token copies with target for packets with copies > 1.
+
+        Packets with copies == 1 are in wait mode and are not forwarded here.
+        """
+        import copy as _copy
+        target_ids = {p.packet_id for p in target.buffer}
+        forwarded = 0
+        for packet in self.buffer:
+            if packet.copies <= 1:
+                continue
+            if packet.packet_id not in target_ids:
+                give = packet.copies // 2
+                packet.copies -= give
+                new_pkt = _copy.copy(packet)
+                new_pkt.copies = give
+                target.receive_packet(new_pkt)
+                forwarded += 1
+        return forwarded
