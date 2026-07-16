@@ -103,12 +103,12 @@ class LunarRoverMeshEnv(ParallelEnv):
         self.PENALTY_INVALID_MOVE = -1.0
         # Coverage reward: agents earn this per newly illuminated pixel (signal >= threshold).
         # The coverage map starts from the BS radio map so only rover-added coverage counts.
-        self.REWARD_COVERAGE_PER_PIXEL = 0.001
-
+        self.REWARD_COVERAGE_PER_PIXEL = 0.002
 
         # DTN config
         self.PACKET_GEN_PROB = 0.5
-        self.REWARD_PACKET_DELIVERY = 1.0
+        self.REWARD_PACKET_DELIVERY = 0.4
+        self.REWARD_LOW_BUFFER = 0.0  # per-step reward × (1 - buffer_fill); 0 = disabled
         self.PENALTY_BUFFER_OVERFLOW = 0 #-5.0
         self.routing_protocol = routing_protocol  # 'none' | 'epidemic' | 'spray_and_wait'
         self.spray_copies = spray_copies
@@ -469,28 +469,28 @@ class LunarRoverMeshEnv(ParallelEnv):
             # random packet generation
             if self.packet_mode == 'boolean':
                 if np.random.rand() < self.PACKET_GEN_PROB and not self.mission_done.get(agent_id, False):
-                    agent.generate_packet(size=10, time_to_live=50, destination="BS_0", time=self.sim_time, spray_copies=spray_copies)
+                    agent.generate_packet(size=10, time_to_live=50, destination="BS_0", time=self.sim_time)
             else:
                 # constant amount
                 bits_needed = self.TELEMETRY_RATE_MBPS * self.STEP_LENGTH * 1e6
                 num_telemetry = int(bits_needed / PACKET_SIZE_BITS)
                 
                 for _ in range(num_telemetry):
-                    agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=5000, destination="BS_0", time=self.sim_time, spray_copies=spray_copies)
+                    agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=5000, destination="BS_0", time=self.sim_time)
 
                 # science burst (simulating finding area of interest and generating large amounts of data)
                 if np.random.rand() < BURST_PROBABILITY:
                     bits_burst = BURST_SIZE_MBITS * 1e6
                     num_burst = int(bits_burst / PACKET_SIZE_BITS)
-
+                    
                     dtn_state = agent.payload_manager.get_state()
                     space_left = dtn_state['buffer_size'] - dtn_state['payload_size']
-
+                    
                     packets_to_gen = min(num_burst, int(space_left / PACKET_SIZE_BITS))
-
+                    
                     if packets_to_gen > 0:
                         for _ in range(packets_to_gen):
-                            agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=5000, destination="BS_0", time=self.sim_time, spray_copies=spray_copies)
+                            agent.generate_packet(size=PACKET_SIZE_BITS, time_to_live=5000, destination="BS_0", time=self.sim_time)
                             
         return actions, rewards, infos
 
@@ -614,8 +614,12 @@ class LunarRoverMeshEnv(ParallelEnv):
 
             # rewards and arrival logic
             curr_dist = np.sqrt((agent.goal_x - agent.x)**2 + (agent.goal_y - agent.y)**2)
-            dist_delta = prev_dist - curr_dist 
+            dist_delta = prev_dist - curr_dist
             rewards[agent_id] += dist_delta * self.REWARD_DIST_SCALE
+            if self.REWARD_LOW_BUFFER > 0.0:
+                dtn = agent.payload_manager.get_state()
+                buf_fill = dtn["payload_size"] / max(dtn["buffer_size"], 1)
+                rewards[agent_id] += self.REWARD_LOW_BUFFER * (1.0 - buf_fill)
             
             if curr_dist < (self.MAX_DIST_PER_STEP*4.0) and not self.mission_done[agent_id]:
                 rewards[agent_id] += self.REWARD_GOAL_ARRIVAL
@@ -805,8 +809,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         final_obs = {
             # -- disabled (kept for future use) --
             # "energy": np.clip(np.array([obs_dict["energy"]], dtype=np.float32), 0.0, 5_000_000.0),
-            # "buffer_usage": np.clip(obs_dict["buffer_usage"].astype(np.float32), 0.0, 1.0),
             # ------------------------------------
+            "buffer_usage": np.clip(obs_dict["buffer_usage"].astype(np.float32), 0.0, 1.0),
             "position":     np.clip(obs_dict["position"],    0.0,    256.0),
             "goal_vector":  np.clip(obs_dict["goal_vector"], -256.0, 256.0),
             "move_history": move_history,
@@ -832,8 +836,8 @@ class LunarRoverMeshEnv(ParallelEnv):
         return spaces.Dict({
             # -- disabled (kept for future use) --
             # "energy": spaces.Box(low=0, high=self.START_ENERGY, shape=(1,), dtype=np.float32),
-            # "buffer_usage": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             # ------------------------------------
+            "buffer_usage": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "position":     spaces.Box(low=0,    high=256, shape=(2,),              dtype=np.float32),
             "goal_vector":  spaces.Box(low=-256, high=256, shape=(2,),              dtype=np.float32),
             "move_history": spaces.Box(low=0,    high=256, shape=(self.HISTORY_LEN,), dtype=np.float32),

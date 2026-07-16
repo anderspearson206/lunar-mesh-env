@@ -34,16 +34,16 @@ echo "================================================================"
 #    The PPO checkpoint is loaded but its comm actions are irrelevant:
 #    epidemic routing floods all neighbor pairs via _apply_routing_protocol.
 # ---------------------------------------------------------------------------
-echo ""
-echo "[1/3] Vahdat epidemic baseline (Lozano env, rate mode)..."
-conda run -n lunar_mesh python examples/eval_ppo_checkpoint.py \
-    --checkpoint "$PPO_CKPT" \
-    --model lozano \
-    --routing epidemic \
-    --routing-bw-limit \
-    --episodes "$EPISODES" \
-    --name epidemic_vahdat \
-    --db "$DB"
+# echo ""
+# echo "[1/3] Vahdat epidemic baseline (Lozano env, rate mode)..."
+# conda run -n lunar_mesh python examples/eval_ppo_checkpoint.py \
+#     --checkpoint "$PPO_CKPT" \
+#     --model lozano \
+#     --routing epidemic \
+#     --routing-bw-limit \
+#     --episodes "$EPISODES" \
+#     --name epidemic_vahdat \
+#     --db "$DB"
 
 # ---------------------------------------------------------------------------
 # 2. Lozano PPO
@@ -55,7 +55,7 @@ conda run -n lunar_mesh python examples/eval_ppo_checkpoint.py \
     --model lozano \
     --algo ppo \
     --episodes "$EPISODES" \
-    --name lozano_ppo \
+    --name lozano_ppo_nav \
     --db "$DB"
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ conda run -n lunar_mesh python examples/eval_ppo_checkpoint.py \
     --model lozano \
     --algo dqn \
     --episodes "$EPISODES" \
-    --name lozano_ddqn \
+    --name lozano_ddqn_nav \
     --db "$DB"
 
 echo ""

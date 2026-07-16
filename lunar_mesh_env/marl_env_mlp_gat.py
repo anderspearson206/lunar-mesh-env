@@ -119,6 +119,7 @@ class LunarRoverMeshMLPGATEnv(LunarRoverMeshEnv):
 
         return {
             "action_mask":              action_mask,
+            "buffer_usage":             np.clip(obs_dict["buffer_usage"].astype(np.float32), 0.0, 1.0),
             "graph_node_features":      node_feats,
             "graph_adj":                adj,
             "goal_vector":              np.clip(obs_dict["goal_vector"], -256.0, 256.0),
@@ -138,6 +139,7 @@ class LunarRoverMeshMLPGATEnv(LunarRoverMeshEnv):
 
         return spaces.Dict({
             "action_mask":              spaces.Box(0, 1,      shape=(mask_dim,),             dtype=np.int8),
+            "buffer_usage":             spaces.Box(0, 1,      shape=(1,),                    dtype=np.float32),
             "graph_node_features":      spaces.Box(-np.inf, np.inf,
                                                    shape=(MAX_NODES, NODE_FEAT_DIM),         dtype=np.float32),
             "graph_adj":                spaces.Box(0, 1,      shape=(MAX_NODES,),            dtype=np.float32),

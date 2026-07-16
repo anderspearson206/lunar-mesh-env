@@ -21,14 +21,15 @@ Comm logit ordering (action[1]):
   comm_logits[2]  → other_rover_1 (graph node 2)
   comm_logits[3]  → base station  (graph node 3)
 
-Flat obs layout (alphabetical key order, total 49 dims):
+Flat obs layout (alphabetical key order, total 50 dims):
   [0:5]   action_mask                (5,)
-  [5:7]   goal_vector                (2,)
-  [7:11]  graph_adj                  (4,)
-  [11:39] graph_node_features        (4×7 = 28,)
-  [39:43] move_history               (4,)
-  [43:47] other_agent_connectivity   (4,)
-  [47:49] position                   (2,)
+  [5:6]   buffer_usage               (1,)
+  [6:8]   goal_vector                (2,)
+  [8:12]  graph_adj                  (4,)
+  [12:40] graph_node_features        (4×7 = 28,)
+  [40:44] move_history               (4,)
+  [44:48] other_agent_connectivity   (4,)
+  [48:50] position                   (2,)
 """
 
 import numpy as np
@@ -42,8 +43,9 @@ from models.mlp_gat_model import GATLayer   # reuse identical GAT implementation
 
 NODE_FEAT_DIM = 7
 
-_SCALAR_KEYS  = ["goal_vector", "move_history", "other_agent_connectivity", "position"]
+_SCALAR_KEYS  = ["buffer_usage", "goal_vector", "move_history", "other_agent_connectivity", "position"]
 _SCALAR_NORMS = {
+    "buffer_usage":             1.0,
     "goal_vector":              256.0,
     "move_history":             256.0,
     "other_agent_connectivity": 1.0,
@@ -60,7 +62,7 @@ class TorchMLPGATLozanoModel(TorchModelV2, nn.Module):
     Unreachable nodes are masked to -inf before softmax.
     """
 
-    def __init__(self, obs_space, action_space, num_outputs, model_config, name):
+    def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kwargs):
         TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
         nn.Module.__init__(self)
 
@@ -71,16 +73,18 @@ class TorchMLPGATLozanoModel(TorchModelV2, nn.Module):
 
         scalar_dim = sum(
             int(np.prod(orig.spaces[k].shape)) for k in _SCALAR_KEYS
-        )  # 2+4+4+2 = 12 — same as base model
+        )  # 1+2+4+4+2 = 13
+
+        # move_dirs=1  → A* nav (idle-only slot, A* overrides)
+        # move_dirs=9  → RL nav (full 9-direction head)
+        move_dirs = model_config.get("custom_model_config", {}).get("move_dirs", 1)
 
         # ── MLP branch ────────────────────────────────────────────────────
-        # move_head outputs 1 logit (idle only); gradient won't waste on unused
-        # movement directions since A* overrides action[0] in the env.
         self.mlp = nn.Sequential(
             nn.Linear(scalar_dim, 256), nn.ReLU(),
             nn.Linear(256, 256),        nn.ReLU(),
         )
-        self.move_head = nn.Linear(256, 1)
+        self.move_head = nn.Linear(256, move_dirs)
 
         # ── GAT branch (unchanged) ────────────────────────────────────────
         self.gat1 = GATLayer(NODE_FEAT_DIM, 32, num_heads=4, concat=True,  dropout=0.2)
