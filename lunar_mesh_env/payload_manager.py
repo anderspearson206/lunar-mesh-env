@@ -26,8 +26,9 @@ class PayloadManager:
         self.id = id
         self.buffer = deque()
         self.num_packets_generated = 0
+        self.num_expired = 0
         self.buffer_size = buffer_size
-        self.payload_size = 0 
+        self.payload_size = 0
     
     def send_packet(self, targets, current_step: int):
         if len(self.buffer) > 0:
@@ -99,12 +100,12 @@ class PayloadManager:
                 target.receive_packet(packet)
                 
     def drop_expired_packets(self, current_step):
-        # Update to use simulation steps instead of time()
         while len(self.buffer) > 0:
             packet = self.buffer[0]
             if current_step - packet.gen_step > packet.time_to_live:
                 self.buffer.popleft()
                 self.payload_size -= packet.size
+                self.num_expired += 1
             else:
                 break
     

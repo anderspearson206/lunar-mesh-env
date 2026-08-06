@@ -1,17 +1,19 @@
 """
-PPO training with Lozano-style single-edge comm + rate-fill forwarding.
+PPO training with Lozano-style single-edge comm + A*-guided residual navigation.
 
-Navigation: A* (inherited from LunarRoverMeshAStarCommEnv)
+Navigation: A* provides the base direction; RL policy learns ±1-sector deviations
+            to reach radio-favourable positions (no curriculum needed).
 Comm action: single edge selection over {hold, peer0, peer1, BS}
              rate-fill to selected target via send_packets_to_target
 
-Compare this run (PPO) against train_dqn_lozano.py (DDQN) on the same env
-to isolate the effect of the training algorithm vs. our PPO baseline.
+Compare against:
+  train_ppo_lozano.py         — A* nav fixed, comm RL
+  train_ppo_lozano_rl_nav.py  — full RL nav + comm (needs eps_nav curriculum)
+  train_ppo_lozano_res_nav.py — A*-guided RL nav (this) + comm RL (no curriculum)
 
 Usage:
-    python examples/train_ppo_lozano.py
-    python examples/train_ppo_lozano.py --maps /path/to/radio_maps_hm_18.npy
-    python examples/train_ppo_lozano.py --name my_run --iterations 200
+    python examples/train_ppo_lozano_res_nav.py
+    python examples/train_ppo_lozano_res_nav.py --name my_run --iterations 200
 """
 
 import argparse
@@ -32,7 +34,7 @@ from ray.rllib.algorithms.callbacks import DefaultCallbacks
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from lunar_mesh_env.marl_env_lozano import LunarRoverMeshLozanoEnv
+from lunar_mesh_env.marl_env_lozano_res_nav import LunarRoverMeshLozanoResNavEnv
 from lunar_mesh_env.radio_model_lookup import RadioMapModelLookup
 from models.mlp_gat_lozano_model import TorchMLPGATLozanoModel
 
@@ -40,9 +42,9 @@ from models.mlp_gat_lozano_model import TorchMLPGATLozanoModel
 # Paths
 # ---------------------------------------------------------------------------
 DATA_ROOT  = "/home/paolo/Documents/lunar-mesh-env/DATA/radio_data_2/radio_data_2"
-HM_PATH    = f"{DATA_ROOT}/hm/hm_15.npy"
-MAPS_PATH  = "/home/paolo/Documents/lunar-mesh-env/DATA_MAPS/radio_maps_hm_15.npy"  #os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          # "radio_maps_hm_18.npy")
+HM_PATH    = f"{DATA_ROOT}/hm/hm_18.npy"
+MAPS_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "radio_maps_hm_18.npy")
 
 # ---------------------------------------------------------------------------
 # Training hyper-parameters
@@ -51,9 +53,9 @@ NUM_AGENTS       = 3
 TRAIN_BATCH_SIZE = 4000
 LR               = 5e-5
 NUM_ENV_RUNNERS  = 6
-TOTAL_ITERATIONS = 50
+TOTAL_ITERATIONS = 100
 CHECKPOINT_FREQ  = 50
-EXPERIMENT_NAME  = "lunar_mesh_ppo_lozano"
+EXPERIMENT_NAME  = "lozano_res_nav"
 WANDB_PROJECT    = "lunar-mesh-rl"
 
 # ---------------------------------------------------------------------------
@@ -68,13 +70,14 @@ def env_creator(config):
         env_width=256,
         env_height=256,
     )
-    raw_env = LunarRoverMeshLozanoEnv(
+    raw_env = LunarRoverMeshLozanoResNavEnv(
         hm_path=config.get("hm_path", HM_PATH),
         radio_model=radio_model,
         num_agents=config.get("num_agents", NUM_AGENTS),
         packet_mode='rate',
         seed=19,
     )
+    raw_env.REWARD_LOW_BUFFER = 0.1
     raw_env.EP_MAX_TIME = config.get("max_episode_steps", 250)
     env = ParallelPettingZooEnv(raw_env)
     env.observation_space = raw_env.observation_spaces[raw_env.possible_agents[0]]
@@ -87,26 +90,32 @@ def env_creator(config):
 # ---------------------------------------------------------------------------
 
 class RewardLoggerCallback(DefaultCallbacks):
+    """Log episode reward and goals to stdout and W&B each iteration."""
+
     def on_train_result(self, *, algorithm=None, result, **_):
         it  = result.get("training_iteration", 0)
         rew = result.get("episode_reward_mean")
         if rew is None or (isinstance(rew, float) and np.isnan(rew)):
             rew = result.get("env_runners", {}).get("episode_reward_mean")
         env_runners = result.get("env_runners", {})
-        eps = (result.get("episodes_this_iter")
-               or env_runners.get("num_episodes")
-               or env_runners.get("num_episodes_lifetime"))
-        print(f"[iter {it:>4}]  episode_reward_mean={rew}  episodes={eps}")
+        n_eps = (result.get("episodes_this_iter")
+                 or env_runners.get("num_episodes")
+                 or env_runners.get("num_episodes_lifetime"))
+        goals = result.get("custom_metrics", {}).get("goals_completed_mean", None)
+
+        print(f"[iter {it:>4}]  episode_reward_mean={rew}  episodes={n_eps}")
         if wandb.run is not None and rew is not None and not np.isnan(float(rew)):
-            wandb.log({"episode_reward_mean": rew,
-                       "episodes_this_iter":  eps or 0}, step=it)
+            log = {"episode_reward_mean": rew, "episodes_this_iter": n_eps or 0}
+            if goals is not None:
+                log["goals_completed_mean"] = goals
+            wandb.log(log, step=it)
 
 
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 ModelCatalog.register_custom_model("mlp_gat_lozano_model", TorchMLPGATLozanoModel)
-register_env("lunar_mesh_lozano_v1", env_creator)
+register_env("lunar_mesh_lozano_res_nav_v1", env_creator)
 
 # ---------------------------------------------------------------------------
 # Build config
@@ -116,7 +125,7 @@ def build_config(obs_space, act_space, maps_path: str):
     return (
         PPOConfig()
         .environment(
-            "lunar_mesh_lozano_v1",
+            "lunar_mesh_lozano_res_nav_v1",
             env_config={
                 "num_agents":        NUM_AGENTS,
                 "hm_path":           HM_PATH,
@@ -133,6 +142,7 @@ def build_config(obs_space, act_space, maps_path: str):
             model={
                 "custom_model":              "mlp_gat_lozano_model",
                 "_disable_preprocessor_api": True,
+                "custom_model_config":       {"move_dirs": 9},
             },
             train_batch_size=TRAIN_BATCH_SIZE,
             lr=LR,
@@ -173,6 +183,7 @@ if __name__ == "__main__":
     parser.add_argument("--iterations", type=int, default=TOTAL_ITERATIONS,
                         help=f"Number of training iterations (default: {TOTAL_ITERATIONS})")
     args = parser.parse_args()
+    TOTAL_ITERATIONS = args.iterations
     run_name = args.name
 
     if not os.path.exists(args.maps):

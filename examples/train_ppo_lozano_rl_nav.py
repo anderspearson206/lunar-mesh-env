@@ -96,8 +96,8 @@ class NavCurriculumCallback(DefaultCallbacks):
         def _set_eps(env):
             if hasattr(env, "eps_nav"):
                 env.eps_nav = eps_nav
-            if hasattr(env, "env") and hasattr(env.env, "eps_nav"):
-                env.env.eps_nav = eps_nav
+            if hasattr(env, "par_env") and hasattr(env.par_env, "eps_nav"):
+                env.par_env.eps_nav = eps_nav
 
         for attr in ("workers", "env_runner_group"):
             obj = getattr(algorithm, attr, None)

@@ -53,11 +53,15 @@ from lunar_mesh_env.marl_env_lozano_rl_nav import LunarRoverMeshLozanoRLNavEnv
 from lunar_mesh_env.marl_env_lozano_rl_nav_radio import LunarRoverMeshLozanoRLNavRadioEnv
 from lunar_mesh_env.marl_env_lozano_rl_nav_cnn import LunarRoverMeshLozanoRLNavCNNEnv
 from lunar_mesh_env.marl_env_lozano_rl_nav_crop import LunarRoverMeshLozanoRLNavCropEnv
+from lunar_mesh_env.marl_env_lozano_res_nav import LunarRoverMeshLozanoResNavEnv
+from lunar_mesh_env.marl_env_lozano_waypoint_nav import LunarRoverMeshLozanoWaypointNavEnv
+from lunar_mesh_env.marl_env_lozano_conn_nav import LunarRoverMeshLozanoConnNavEnv
 from lunar_mesh_env.radio_model_lookup import RadioMapModelLookup
 from models.action_mask_model import TorchActionMaskModel
 from models.mlp_gat_model import TorchMLPGATModel
 from models.mlp_gat_radio_model import TorchMLPGATRadioModel
 from models.mlp_gat_lozano_model import TorchMLPGATLozanoModel
+from models.mlp_gat_lozano_waypoint_model import TorchMLPGATLozanoWaypointModel
 from models.mlp_gat_lozano_radio_model import TorchMLPGATLozanoRadioModel
 from models.mlp_gat_lozano_cnn_model import TorchMLPGATLozanoCNNModel
 from models.mlp_gat_lozano_crop_model import TorchMLPGATLozanoCropModel
@@ -75,21 +79,24 @@ _MLPGAT_SUBENVS = {
 }
 
 _LOZANO_SUBENVS = {
-    "lozano":              LunarRoverMeshLozanoEnv,
-    "lozano_rl_nav":       LunarRoverMeshLozanoRLNavEnv,
-    "lozano_rl_nav_radio": LunarRoverMeshLozanoRLNavRadioEnv,
-    "lozano_rl_nav_cnn":   LunarRoverMeshLozanoRLNavCNNEnv,
-    "lozano_rl_nav_crop":  LunarRoverMeshLozanoRLNavCropEnv,
+    "lozano":                LunarRoverMeshLozanoEnv,
+    "lozano_rl_nav":         LunarRoverMeshLozanoRLNavEnv,
+    "lozano_rl_nav_radio":   LunarRoverMeshLozanoRLNavRadioEnv,
+    "lozano_rl_nav_cnn":     LunarRoverMeshLozanoRLNavCNNEnv,
+    "lozano_rl_nav_crop":    LunarRoverMeshLozanoRLNavCropEnv,
+    "lozano_res_nav":        LunarRoverMeshLozanoResNavEnv,
+    "lozano_waypoint_nav":   LunarRoverMeshLozanoWaypointNavEnv,
+    "lozano_conn_nav":       LunarRoverMeshLozanoConnNavEnv,
 }
 
-DEFAULT_MAPS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "radio_maps_hm_18.npy")
+DEFAULT_MAPS = "/home/paolo/Documents/lunar-mesh-env/DATA_MAPS/radio_maps_hm_15.npy" #os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                #            "radio_maps_hm_18.npy")
 
 # ---------------------------------------------------------------------------
 # Mirror the same paths / dims used in train_ppo_rllib.py
 # ---------------------------------------------------------------------------
 DATA_ROOT   = "/home/paolo/Documents/lunar-mesh-env/DATA/radio_data_2/radio_data_2"
-HM_PATH     = f"{DATA_ROOT}/hm/hm_18.npy"
+HM_PATH     = f"{DATA_ROOT}/hm/hm_15.npy"
 _PRETRAINED = os.path.join(_REPO_ROOT, "RadioLunaDiff/pretrained_models_network")
 MODEL_PATHS = {
     "k2_model":        os.path.join(_PRETRAINED, "k2unet/best_k2_model.pth"),
@@ -223,6 +230,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
             conn.execute("ALTER TABLE env_step_metrics ADD COLUMN covered_pixels INTEGER")
         if "bw_utilization" not in existing_env:
             conn.execute("ALTER TABLE env_step_metrics ADD COLUMN bw_utilization REAL")
+        if "bw_util_connected" not in existing_env:
+            conn.execute("ALTER TABLE env_step_metrics ADD COLUMN bw_util_connected REAL")
         conn.commit()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS episodes (
@@ -275,7 +284,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
             bs_link_ratio         REAL,
             num_active_agents     INTEGER,
             covered_pixels        INTEGER,
-            bw_utilization        REAL
+            bw_utilization        REAL,
+            bw_util_connected     REAL
         );
     """)
     conn.commit()
@@ -342,6 +352,8 @@ def collect_env_metrics(env: LunarRoverMeshEnv, step: int, episode_id: int,
     packets_this_step = bs.num_packets_received - prev_bs_packets
     bits_delivered = packets_this_step * PACKET_SIZE_BITS
     bw_util = min(bits_delivered / bs_capacity_bits, 1.0) if bs_capacity_bits > 0 else 0.0
+    # NULL when no BS connection so AVG() in SQL ignores disconnected steps.
+    bw_util_connected = min(bits_delivered / bs_capacity_bits, 1.0) if bs_capacity_bits > 0 else None
 
     # Instantaneous coverage: union of BS map + each rover's current radio map.
     # Uses _cached_radio_map set by _compute_coverage_reward this step.
@@ -371,6 +383,7 @@ def collect_env_metrics(env: LunarRoverMeshEnv, step: int, episode_id: int,
         len(active),
         covered_pixels,
         float(bw_util),
+        bw_util_connected,
     )
 
 
@@ -402,7 +415,9 @@ def main():
                                  "astar_comm", "astar_eps_comm",
                                  "astar_forward_reward",
                                  "lozano", "lozano_rl_nav", "lozano_rl_nav_radio",
-                                 "lozano_rl_nav_cnn", "lozano_rl_nav_crop"],
+                                 "lozano_rl_nav_cnn", "lozano_rl_nav_crop",
+                                 "lozano_res_nav", "lozano_waypoint_nav",
+                                 "lozano_conn_nav"],
                         default="mlp",
                         help="Policy architecture to evaluate (default: mlp)")
     parser.add_argument("--routing", default="none",
@@ -414,6 +429,8 @@ def main():
                         help="Constrain epidemic to actual link rate (Vahdat 802.11 model)")
     parser.add_argument("--episodes", type=int, default=1,
                         help="Number of evaluation episodes (default: 1)")
+    parser.add_argument("--ttl", type=int, default=None,
+                        help="Override packet TTL in steps (default: env default of 50)")
     parser.add_argument("--algo", choices=["ppo", "dqn"], default="ppo",
                         help="Algorithm that produced the checkpoint (default: ppo)")
     args = parser.parse_args()
@@ -424,17 +441,21 @@ def main():
         maps_path = DEFAULT_MAPS
         print(f"Using precomputed radio maps: {maps_path}")
 
-    checkpoint = args.checkpoint or find_latest_checkpoint(RAY_RESULTS_DIR)
-    print(f"Loading checkpoint: {checkpoint}")
-    print(f"Model type: {args.model}")
+    routing_only = args.routing != "none"
+
+    checkpoint = None if routing_only else (args.checkpoint or find_latest_checkpoint(RAY_RESULTS_DIR))
+    if checkpoint:
+        print(f"Loading checkpoint: {checkpoint}")
+    print(f"Model type: {'routing-only (' + args.routing + ')' if routing_only else args.model}")
 
     ModelCatalog.register_custom_model("action_mask_model",      TorchActionMaskModel)
     ModelCatalog.register_custom_model("mlp_gat_model",          TorchMLPGATModel)
     ModelCatalog.register_custom_model("mlp_gat_radio_model",    TorchMLPGATRadioModel)
-    ModelCatalog.register_custom_model("mlp_gat_lozano_model",       TorchMLPGATLozanoModel)
-    ModelCatalog.register_custom_model("mlp_gat_lozano_radio_model", TorchMLPGATLozanoRadioModel)
-    ModelCatalog.register_custom_model("mlp_gat_lozano_cnn_model",   TorchMLPGATLozanoCNNModel)
-    ModelCatalog.register_custom_model("mlp_gat_lozano_crop_model",  TorchMLPGATLozanoCropModel)
+    ModelCatalog.register_custom_model("mlp_gat_lozano_model",         TorchMLPGATLozanoModel)
+    ModelCatalog.register_custom_model("mlp_gat_lozano_waypoint_model", TorchMLPGATLozanoWaypointModel)
+    ModelCatalog.register_custom_model("mlp_gat_lozano_radio_model",   TorchMLPGATLozanoRadioModel)
+    ModelCatalog.register_custom_model("mlp_gat_lozano_cnn_model",     TorchMLPGATLozanoCNNModel)
+    ModelCatalog.register_custom_model("mlp_gat_lozano_crop_model",    TorchMLPGATLozanoCropModel)
     register_env("lunar_mesh_v1", env_creator)
     ray.init(ignore_reinit_error=True, num_gpus=0)
 
@@ -457,9 +478,15 @@ def main():
         elif args.model == "lozano_rl_nav_radio":
             custom_model    = "mlp_gat_lozano_radio_model"
             extra_model_cfg = {"custom_model_config": {"move_dirs": 9}}
-        elif args.model == "lozano_rl_nav":
+        elif args.model in ("lozano_rl_nav", "lozano_res_nav"):
             custom_model    = "mlp_gat_lozano_model"
             extra_model_cfg = {"custom_model_config": {"move_dirs": 9}}
+        elif args.model == "lozano_waypoint_nav":
+            from lunar_mesh_env.marl_env_lozano_waypoint_nav import (
+                LunarRoverMeshLozanoWaypointNavEnv as _WNE,
+            )
+            custom_model    = "mlp_gat_lozano_waypoint_model"
+            extra_model_cfg = {"custom_model_config": {"move_dirs": _WNE.N_NAV}}
         else:
             custom_model    = "mlp_gat_lozano_model"
             extra_model_cfg = {}
@@ -470,55 +497,59 @@ def main():
         custom_model      = "action_mask_model"
         extra_model_cfg   = {}
 
-    probe = env_creator(env_config)
-    obs_space = probe.observation_space
-    act_space = probe.action_space
-    probe.close()
+    policy = None
+    if not routing_only:
+        probe = env_creator(env_config)
+        obs_space = probe.observation_space
+        act_space = probe.action_space
+        probe.close()
 
-    base_cfg = (
-        (DQNConfig() if args.algo == "dqn" else PPOConfig())
-        .environment("lunar_mesh_v1", env_config=env_config)
-        .framework("torch")
-        .api_stack(
-            enable_rl_module_and_learner=False,
-            enable_env_runner_and_connector_v2=False,
-        )
-        .multi_agent(
-            policies={"shared_policy": (None, obs_space, act_space, {})},
-            policy_mapping_fn=lambda agent_id, *args, **kwargs: "shared_policy",
-        )
-        .env_runners(num_env_runners=0)
-        .resources(num_gpus=0)
-    )
-    model_cfg = {"custom_model": custom_model,
-                 "_disable_preprocessor_api": True,
-                 **extra_model_cfg}
-    if args.algo == "dqn":
-        base_cfg = base_cfg.training(
-            model=model_cfg,
-            hiddens=[],
-            replay_buffer_config={"type": "MultiAgentPrioritizedReplayBuffer"},
-        )
-    else:
-        base_cfg = base_cfg.training(model=model_cfg)
-    algo = base_cfg.build()
-    try:
-        algo.restore(checkpoint)
-    except (ValueError, RuntimeError) as e:
-        if "optimizer" in str(e).lower() or "parameter group" in str(e).lower():
-            # Optimizer state mismatch — weights-only fallback (safe for eval)
-            import pickle
-            policy_pkl = os.path.join(
-                checkpoint, "policies", "shared_policy", "policy_state.pkl"
+        base_cfg = (
+            (DQNConfig() if args.algo == "dqn" else PPOConfig())
+            .environment("lunar_mesh_v1", env_config=env_config)
+            .framework("torch")
+            .api_stack(
+                enable_rl_module_and_learner=False,
+                enable_env_runner_and_connector_v2=False,
             )
-            with open(policy_pkl, "rb") as f:
-                policy_state = pickle.load(f)
-            algo.get_policy("shared_policy").set_weights(policy_state["weights"])
-            print(f"Warning: optimizer state skipped ({e})")
+            .multi_agent(
+                policies={"shared_policy": (None, obs_space, act_space, {})},
+                policy_mapping_fn=lambda agent_id, *args, **kwargs: "shared_policy",
+            )
+            .env_runners(num_env_runners=0)
+            .resources(num_gpus=0)
+        )
+        model_cfg = {"custom_model": custom_model,
+                     "_disable_preprocessor_api": True,
+                     **extra_model_cfg}
+        if args.algo == "dqn":
+            base_cfg = base_cfg.training(
+                model=model_cfg,
+                hiddens=[],
+                replay_buffer_config={"type": "MultiAgentPrioritizedReplayBuffer"},
+            )
         else:
-            raise
-    policy = algo.get_policy("shared_policy")
-    print("Policy restored.")
+            base_cfg = base_cfg.training(model=model_cfg)
+        algo = base_cfg.build()
+        try:
+            algo.restore(checkpoint)
+        except (ValueError, RuntimeError) as e:
+            if "optimizer" in str(e).lower() or "parameter group" in str(e).lower():
+                # Optimizer state mismatch — weights-only fallback (safe for eval)
+                import pickle
+                policy_pkl = os.path.join(
+                    checkpoint, "policies", "shared_policy", "policy_state.pkl"
+                )
+                with open(policy_pkl, "rb") as f:
+                    policy_state = pickle.load(f)
+                algo.get_policy("shared_policy").set_weights(policy_state["weights"])
+                print(f"Warning: optimizer state skipped ({e})")
+            else:
+                raise
+        policy = algo.get_policy("shared_policy")
+        print("Policy restored.")
+    else:
+        print(f"Routing-only mode ({args.routing}) — no checkpoint needed.")
 
     # ── Init DB ───────────────────────────────────────────────────────────
     conn = init_db(args.db)
@@ -539,6 +570,14 @@ def main():
     packets_per_ep = []
 
     def _make_env(seed):
+        # Routing-only baselines use A* navigation so only the routing protocol matters.
+        # packet_mode='rate' matches lozano env (TTL=5000); boolean mode (TTL=50) expires
+        # packets before agents reach the BS.
+        if routing_only:
+            return LunarRoverMeshAStarCommEnv(
+                hm_path=HM_PATH, radio_model=radio_model, num_agents=NUM_AGENTS,
+                packet_mode='rate', render_mode="rgb_array", seed=seed, **_routing_kwargs,
+            )
         if args.model in _RADIO_MODES:
             return LunarRoverMeshRadioEnv(
                 hm_path=HM_PATH, radio_model=radio_model, num_agents=NUM_AGENTS,
@@ -553,7 +592,7 @@ def main():
             if args.model == "lozano":
                 kw["action_type"] = lozano_action_type
             env = env_cls(**kw)
-            if args.model in ("lozano_rl_nav", "lozano_rl_nav_radio", "lozano_rl_nav_cnn", "lozano_rl_nav_crop"):
+            if args.model in ("lozano_rl_nav", "lozano_rl_nav_radio", "lozano_rl_nav_cnn", "lozano_rl_nav_crop", "lozano_res_nav"):
                 env.eps_nav = 0.0
             return env
         elif args.model in _MLPGAT_SUBENVS:
@@ -575,12 +614,14 @@ def main():
 
     for ep_idx, seed in enumerate(seeds):
         env = _make_env(seed)
+        if args.ttl is not None:
+            env.PACKET_TTL = args.ttl
 
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO episodes (timestamp, checkpoint, num_agents, dummy_mode, seed, run_name) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (datetime.datetime.now().isoformat(), checkpoint, NUM_AGENTS,
+            (datetime.datetime.now().isoformat(), checkpoint or args.routing, NUM_AGENTS,
              int(args.dummy_mode), seed, args.name),
         )
         conn.commit()
@@ -598,15 +639,19 @@ def main():
         for step in range(args.steps):
             actions = {}
             for agent_id in env.agents:
-                action, _, _ = policy.compute_single_action(
-                    obs[agent_id],
-                    policy_id="shared_policy",
-                    explore=False,
-                )
+                if policy is not None:
+                    action, _, _ = policy.compute_single_action(
+                        obs[agent_id],
+                        policy_id="shared_policy",
+                        explore=False,
+                    )
+                else:
+                    # Routing-only: A* handles nav, routing protocol handles comm.
+                    action = np.zeros(env.action_space(agent_id).shape, dtype=np.int64)
                 actions[agent_id] = action
                 if step == 0 and ep_idx == 0:
-                    mask = obs[agent_id]["action_mask"]
-                    print(f"  [{agent_id}] move mask: {mask[:9]}  action: {action}")
+                    mask = obs[agent_id].get("action_mask", [])
+                    print(f"  [{agent_id}] action: {action}  mask[:9]: {mask[:9]}")
 
             obs, rewards, terms, truncs, _ = env.step(actions)
 
@@ -642,7 +687,7 @@ def main():
             agent_rows,
         )
         conn.executemany(
-            "INSERT INTO env_step_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO env_step_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             env_rows,
         )
         cur.execute("UPDATE episodes SET total_steps=? WHERE id=?", (step + 1, episode_id))
@@ -658,7 +703,8 @@ def main():
         env.close()
 
     conn.close()
-    algo.stop()
+    if not routing_only:
+        algo.stop()
     ray.shutdown()
 
     # ── Summary ───────────────────────────────────────────────────────────

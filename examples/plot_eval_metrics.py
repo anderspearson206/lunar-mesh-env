@@ -98,20 +98,23 @@ def load_env_metrics(conn: sqlite3.Connection, run_name: str) -> dict:
                m.bs_duplicate_packets,
                m.avg_datarate_mbps,
                m.bs_link_ratio,
-               COALESCE(m.bw_utilization, 0.0) as bw_util
+               COALESCE(m.bw_utilization, 0.0)   as bw_util,
+               m.bw_util_connected
         FROM env_step_metrics m
         JOIN episodes e ON m.episode_id = e.id
         WHERE e.run_name = ?
         ORDER BY m.step
     """, (run_name,)).fetchall()
 
-    by_step = defaultdict(lambda: {"unique": [], "dup": [], "dr": [], "ratio": [], "bw": []})
-    for step, unique, dup, dr, ratio, bw in rows:
+    by_step = defaultdict(lambda: {"unique": [], "dup": [], "dr": [], "ratio": [], "bw": [], "bw_conn": []})
+    for step, unique, dup, dr, ratio, bw, bw_conn in rows:
         by_step[step]["unique"].append(unique or 0)
         by_step[step]["dup"].append(dup or 0)
         by_step[step]["dr"].append(dr or 0.0)
         by_step[step]["ratio"].append(ratio or 0.0)
         by_step[step]["bw"].append(bw or 0.0)
+        if bw_conn is not None:
+            by_step[step]["bw_conn"].append(bw_conn)
 
     steps = np.array(sorted(by_step))
     def _ms(key):
@@ -119,24 +122,31 @@ def load_env_metrics(conn: sqlite3.Connection, run_name: str) -> dict:
         stds = [np.std(by_step[s][key])  for s in steps]
         return np.array(vals), np.array(stds)
 
-    unique_m, unique_s = _ms("unique")
-    dup_m,    dup_s    = _ms("dup")
-    dr_m,     dr_s     = _ms("dr")
-    ratio_m,  ratio_s  = _ms("ratio")
-    bw_m,     bw_s     = _ms("bw")
+    def _ms_opt(key):
+        vals = [np.mean(by_step[s][key]) if by_step[s][key] else np.nan for s in steps]
+        stds = [np.std(by_step[s][key])  if by_step[s][key] else np.nan for s in steps]
+        return np.array(vals), np.array(stds)
+
+    unique_m, unique_s   = _ms("unique")
+    dup_m,    dup_s      = _ms("dup")
+    dr_m,     dr_s       = _ms("dr")
+    ratio_m,  ratio_s    = _ms("ratio")
+    bw_m,     bw_s       = _ms("bw")
+    bw_conn_m, bw_conn_s = _ms_opt("bw_conn")
 
     # Delivery efficiency = unique / (unique + duplicates), per step
     total = unique_m + dup_m
     eff_m = np.where(total > 0, unique_m / total * 100, np.nan)
 
     return {
-        "steps":      steps,
-        "unique_m":   unique_m,   "unique_s":   unique_s,
-        "dup_m":      dup_m,      "dup_s":      dup_s,
-        "dr_m":       dr_m,       "dr_s":       dr_s,
-        "ratio_m":    ratio_m,    "ratio_s":    ratio_s,
-        "eff_m":      eff_m,
-        "bw_m":       bw_m,       "bw_s":       bw_s,
+        "steps":       steps,
+        "unique_m":    unique_m,    "unique_s":    unique_s,
+        "dup_m":       dup_m,       "dup_s":       dup_s,
+        "dr_m":        dr_m,        "dr_s":        dr_s,
+        "ratio_m":     ratio_m,     "ratio_s":     ratio_s,
+        "eff_m":       eff_m,
+        "bw_m":        bw_m,        "bw_s":        bw_s,
+        "bw_conn_m":   bw_conn_m,   "bw_conn_s":   bw_conn_s,
     }
 
 
@@ -273,8 +283,8 @@ def main():
     ax_link  = axes[2, 1]   # BS link ratio / dwell fraction over episode
     ax_goals = axes[3, 0]   # Goals reached (cumulative, per agent)
     ax_cov   = axes[3, 1]   # Coverage area (pixels above threshold)
-    ax_bw    = axes[4, 0]   # Bandwidth utilization (bits sent / BS link capacity)
-    axes[4, 1].set_visible(False)
+    ax_bw      = axes[4, 0]   # Bandwidth utilization (all steps, unconnected=0)
+    ax_bw_conn = axes[4, 1]   # Bandwidth utilization (connected steps only)
 
     for idx, run_name in enumerate(run_names):
         col   = colours[idx % len(colours)]
@@ -301,6 +311,14 @@ def main():
         _band(ax_bw, env["steps"], env["bw_m"] * 100, env["bw_s"] * 100, col, label, linestyle=ls)
         ax_bw.axhline(bw_mean_pct, color=col, linewidth=1.0, linestyle=":", alpha=0.8,
                       label=f"{_RUN_LABELS.get(run_name, run_name)} mean={bw_mean_pct:.1f}%")
+
+        valid = ~np.isnan(env["bw_conn_m"])
+        if valid.any():
+            conn_mean_pct = float(np.nanmean(env["bw_conn_m"]) * 100)
+            _band(ax_bw_conn, env["steps"][valid], env["bw_conn_m"][valid] * 100,
+                  env["bw_conn_s"][valid] * 100, col, label, linestyle=ls)
+            ax_bw_conn.axhline(conn_mean_pct, color=col, linewidth=1.0, linestyle=":", alpha=0.8,
+                               label=f"{_RUN_LABELS.get(run_name, run_name)} mean={conn_mean_pct:.1f}%")
 
     conn.close()
 
@@ -329,8 +347,10 @@ def main():
                    "Goals completed", integer=True)
     _fmt(ax_cov,   "Instantaneous Coverage (BS + rovers above threshold)",
                    "Covered pixels", integer=True)
-    _fmt(ax_bw,    "Bandwidth Utilization\nbits sent to BS / total BS link capacity",
-                   "% utilization", pct=True)
+    _fmt(ax_bw,      "Bandwidth Utilization (all steps)\nbits sent to BS / total BS link capacity",
+                     "% utilization", pct=True)
+    _fmt(ax_bw_conn, "Bandwidth Utilization (BS-connected steps only)\nbits sent / link capacity when connected",
+                     "% utilization", pct=True)
 
     n_str = ", ".join(run_names)
     fig.suptitle(f"Algorithm Comparison — {n_str}", fontsize=12, fontweight="bold")

@@ -36,6 +36,7 @@ class LunarRoverMeshEnv(ParallelEnv):
     }
 
     HISTORY_LEN = 4   # number of past movement actions kept in observation
+    PACKET_TTL  = 50  # steps before an undelivered packet expires
 
     def __init__(self,
                  hm_path='../radio_data_2/radio_data_2/hm/hm_18.npy',
@@ -97,13 +98,13 @@ class LunarRoverMeshEnv(ParallelEnv):
         # The rovers know how to reach the goal (preset path)
         # but since we allow them to leave the path for comms, 
         # we need to reward them for arriving.
-        self.REWARD_GOAL_ARRIVAL = 100.0
-        self.REWARD_DIST_SCALE = 2.0
+        self.REWARD_GOAL_ARRIVAL = 20.0
+        self.REWARD_DIST_SCALE = 5.0
         self.PENALTY_FAIL = -0.1
         self.PENALTY_INVALID_MOVE = -1.0
         # Coverage reward: agents earn this per newly illuminated pixel (signal >= threshold).
         # The coverage map starts from the BS radio map so only rover-added coverage counts.
-        self.REWARD_COVERAGE_PER_PIXEL = 0.002
+        self.REWARD_COVERAGE_PER_PIXEL = 0.0 #0.002
 
         # DTN config
         self.PACKET_GEN_PROB = 0.5
@@ -469,7 +470,7 @@ class LunarRoverMeshEnv(ParallelEnv):
             # random packet generation
             if self.packet_mode == 'boolean':
                 if np.random.rand() < self.PACKET_GEN_PROB and not self.mission_done.get(agent_id, False):
-                    agent.generate_packet(size=10, time_to_live=50, destination="BS_0", time=self.sim_time)
+                    agent.generate_packet(size=10, time_to_live=self.PACKET_TTL, destination="BS_0", time=self.sim_time)
             else:
                 # constant amount
                 bits_needed = self.TELEMETRY_RATE_MBPS * self.STEP_LENGTH * 1e6

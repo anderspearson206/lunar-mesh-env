@@ -3,3 +3,15 @@ from .marl_env import LunarRoverMeshEnv
 from .marl_entities import MarlMeshAgent
 from .radio_model_nn import RadioMapModelNN
 from .marl_env import BaseStation
+from .marl_env_mlp_gat import LunarRoverMeshMLPGATEnv
+from .marl_env_radio import LunarRoverMeshRadioEnv
+from .marl_env_shared_reward import LunarRoverMeshSharedRewardEnv
+from .marl_env_forward_reward import LunarRoverMeshForwardRewardEnv
+from .marl_env_eps_comm import LunarRoverMeshEpsCommEnv
+from .marl_env_touched_reward import LunarRoverMeshTouchedRewardEnv
+from .marl_env_touched_eps_comm import LunarRoverMeshTouchedEpsCommEnv
+from .marl_env_astar_comm import LunarRoverMeshAStarCommEnv
+from .marl_env_astar_eps_comm import LunarRoverMeshAStarEpsCommEnv
+from .marl_env_astar_forward_reward import LunarRoverMeshAStarForwardRewardEnv
+from .marl_env_lozano import LunarRoverMeshLozanoEnv
+from .marl_env_lozano_rl_nav import LunarRoverMeshLozanoRLNavEnv

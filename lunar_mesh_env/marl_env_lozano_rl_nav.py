@@ -127,7 +127,7 @@ class LunarRoverMeshLozanoRLNavEnv(LunarRoverMeshTouchedRewardEnv):
                 if (np.random.rand() < self.PACKET_GEN_PROB
                         and not self.mission_done.get(agent_id, False)):
                     agent.generate_packet(
-                        size=10, time_to_live=50,
+                        size=10, time_to_live=self.PACKET_TTL,
                         destination="BS_0", time=self.sim_time,
                         spray_copies=spray_copies,
                     )

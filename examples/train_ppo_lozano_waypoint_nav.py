@@ -1,17 +1,25 @@
 """
-PPO training with Lozano-style single-edge comm + rate-fill forwarding.
+PPO training: Lozano RL comm + slow-timescale waypoint-residual navigation.
 
-Navigation: A* (inherited from LunarRoverMeshAStarCommEnv)
-Comm action: single edge selection over {hold, peer0, peer1, BS}
-             rate-fill to selected target via send_packets_to_target
+Navigation: every WAYPOINT_INTERVAL steps the policy chooses one of N_NAV options:
+  - NULL (0): navigate straight to goal via terrain A* — the floor
+  - 1..16:    offset codebook (8 dirs × 2 magnitudes) applied to the nominal subgoal
+Between decisions A* does low-level pathing; heuristic_move_action follows nav_path.
 
-Compare this run (PPO) against train_dqn_lozano.py (DDQN) on the same env
-to isolate the effect of the training algorithm vs. our PPO baseline.
+Comm action: single Lozano edge (hold / peer0 / peer1 / BS).
+
+Floor guarantee: a policy that always emits 0 (NULL) reproduces plain A* navigation
+exactly — the same as train_ppo_lozano.py. Use this as a sanity check.
+
+Compare against:
+  train_ppo_lozano.py           — A* nav (fixed), Lozano comm RL
+  train_ppo_lozano_res_nav.py   — per-step ±1 sector residual, Lozano comm RL
+  train_ppo_lozano_rl_nav.py    — full RL nav + comm (needs eps_nav curriculum)
+  train_ppo_lozano_waypoint_nav — slow-timescale waypoint residual (this)
 
 Usage:
-    python examples/train_ppo_lozano.py
-    python examples/train_ppo_lozano.py --maps /path/to/radio_maps_hm_18.npy
-    python examples/train_ppo_lozano.py --name my_run --iterations 200
+    python examples/train_ppo_lozano_waypoint_nav.py
+    python examples/train_ppo_lozano_waypoint_nav.py --name my_run --iterations 200
 """
 
 import argparse
@@ -32,9 +40,9 @@ from ray.rllib.algorithms.callbacks import DefaultCallbacks
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from lunar_mesh_env.marl_env_lozano import LunarRoverMeshLozanoEnv
+from lunar_mesh_env.marl_env_lozano_waypoint_nav import LunarRoverMeshLozanoWaypointNavEnv
 from lunar_mesh_env.radio_model_lookup import RadioMapModelLookup
-from models.mlp_gat_lozano_model import TorchMLPGATLozanoModel
+from models.mlp_gat_lozano_waypoint_model import TorchMLPGATLozanoWaypointModel
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -45,16 +53,18 @@ MAPS_PATH  = "/home/paolo/Documents/lunar-mesh-env/DATA_MAPS/radio_maps_hm_15.np
                           # "radio_maps_hm_18.npy")
 
 # ---------------------------------------------------------------------------
-# Training hyper-parameters
+# Hyperparameters
 # ---------------------------------------------------------------------------
 NUM_AGENTS       = 3
 TRAIN_BATCH_SIZE = 4000
 LR               = 5e-5
 NUM_ENV_RUNNERS  = 6
-TOTAL_ITERATIONS = 50
+TOTAL_ITERATIONS = 100
 CHECKPOINT_FREQ  = 50
-EXPERIMENT_NAME  = "lunar_mesh_ppo_lozano"
+EXPERIMENT_NAME  = "lozano_waypoint_nav"
 WANDB_PROJECT    = "lunar-mesh-rl"
+
+N_NAV = LunarRoverMeshLozanoWaypointNavEnv.N_NAV   # 17
 
 # ---------------------------------------------------------------------------
 # Environment factory
@@ -68,14 +78,16 @@ def env_creator(config):
         env_width=256,
         env_height=256,
     )
-    raw_env = LunarRoverMeshLozanoEnv(
+    raw_env = LunarRoverMeshLozanoWaypointNavEnv(
         hm_path=config.get("hm_path", HM_PATH),
         radio_model=radio_model,
         num_agents=config.get("num_agents", NUM_AGENTS),
-        packet_mode='rate',
+        packet_mode="rate",
         seed=19,
     )
     raw_env.EP_MAX_TIME = config.get("max_episode_steps", 250)
+    if "packet_ttl" in config:
+        raw_env.PACKET_TTL = config["packet_ttl"]
     env = ParallelPettingZooEnv(raw_env)
     env.observation_space = raw_env.observation_spaces[raw_env.possible_agents[0]]
     env.action_space      = raw_env.action_space(raw_env.possible_agents[0])
@@ -83,7 +95,7 @@ def env_creator(config):
 
 
 # ---------------------------------------------------------------------------
-# Callbacks
+# Callback
 # ---------------------------------------------------------------------------
 
 class RewardLoggerCallback(DefaultCallbacks):
@@ -93,36 +105,42 @@ class RewardLoggerCallback(DefaultCallbacks):
         if rew is None or (isinstance(rew, float) and np.isnan(rew)):
             rew = result.get("env_runners", {}).get("episode_reward_mean")
         env_runners = result.get("env_runners", {})
-        eps = (result.get("episodes_this_iter")
-               or env_runners.get("num_episodes")
-               or env_runners.get("num_episodes_lifetime"))
-        print(f"[iter {it:>4}]  episode_reward_mean={rew}  episodes={eps}")
+        n_eps = (result.get("episodes_this_iter")
+                 or env_runners.get("num_episodes")
+                 or env_runners.get("num_episodes_lifetime"))
+
+        print(f"[iter {it:>4}]  episode_reward_mean={rew}  episodes={n_eps}")
         if wandb.run is not None and rew is not None and not np.isnan(float(rew)):
-            wandb.log({"episode_reward_mean": rew,
-                       "episodes_this_iter":  eps or 0}, step=it)
+            wandb.log({"episode_reward_mean": rew, "episodes_this_iter": n_eps or 0},
+                      step=it)
 
 
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
-ModelCatalog.register_custom_model("mlp_gat_lozano_model", TorchMLPGATLozanoModel)
-register_env("lunar_mesh_lozano_v1", env_creator)
+ModelCatalog.register_custom_model(
+    "mlp_gat_lozano_waypoint_model", TorchMLPGATLozanoWaypointModel
+)
+register_env("lunar_mesh_lozano_waypoint_nav_v1", env_creator)
 
 # ---------------------------------------------------------------------------
-# Build config
+# Config
 # ---------------------------------------------------------------------------
 
-def build_config(obs_space, act_space, maps_path: str):
+def build_config(obs_space, act_space, maps_path: str, extra_env_cfg: dict | None = None):
+    env_cfg = {
+        "num_agents":        NUM_AGENTS,
+        "hm_path":           HM_PATH,
+        "maps_path":         maps_path,
+        "max_episode_steps": 250,
+    }
+    if extra_env_cfg:
+        env_cfg.update(extra_env_cfg)
     return (
         PPOConfig()
         .environment(
-            "lunar_mesh_lozano_v1",
-            env_config={
-                "num_agents":        NUM_AGENTS,
-                "hm_path":           HM_PATH,
-                "maps_path":         maps_path,
-                "max_episode_steps": 250,
-            },
+            "lunar_mesh_lozano_waypoint_nav_v1",
+            env_config=env_cfg,
         )
         .framework("torch")
         .api_stack(
@@ -131,14 +149,15 @@ def build_config(obs_space, act_space, maps_path: str):
         )
         .training(
             model={
-                "custom_model":              "mlp_gat_lozano_model",
+                "custom_model":              "mlp_gat_lozano_waypoint_model",
                 "_disable_preprocessor_api": True,
+                "custom_model_config":       {"move_dirs": N_NAV},
             },
             train_batch_size=TRAIN_BATCH_SIZE,
             lr=LR,
             lambda_=0.95,
             clip_param=0.2,
-            entropy_coeff=0.05,
+            entropy_coeff=1.0,
             num_sgd_iter=10,
             grad_clip=1.0,
             minibatch_size=512,
@@ -172,7 +191,10 @@ if __name__ == "__main__":
                         help="Warm-start from an existing checkpoint directory")
     parser.add_argument("--iterations", type=int, default=TOTAL_ITERATIONS,
                         help=f"Number of training iterations (default: {TOTAL_ITERATIONS})")
+    parser.add_argument("--ttl", type=int, default=None,
+                        help="Packet TTL in steps (default: env default of 50)")
     args = parser.parse_args()
+    TOTAL_ITERATIONS = args.iterations
     run_name = args.name
 
     if not os.path.exists(args.maps):
@@ -180,12 +202,16 @@ if __name__ == "__main__":
         print("Run examples/precompute_radio_maps.py first.")
         raise SystemExit(1)
 
-    probe_env = env_creator({"hm_path": HM_PATH, "num_agents": NUM_AGENTS,
-                              "max_episode_steps": 500, "maps_path": args.maps})
+    _env_cfg = {"hm_path": HM_PATH, "num_agents": NUM_AGENTS,
+                "max_episode_steps": 250, "maps_path": args.maps}
+    if args.ttl is not None:
+        _env_cfg["packet_ttl"] = args.ttl
+    probe_env = env_creator(_env_cfg)
     obs_space = probe_env.observation_space
     act_space = probe_env.action_space
     print(f"Observation space : {obs_space}")
     print(f"Action space      : {act_space}")
+    print(f"N_NAV             : {N_NAV}")
     probe_env.close()
 
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -198,7 +224,8 @@ if __name__ == "__main__":
         _system_config={"memory_usage_threshold": 0.99},
     )
 
-    config = build_config(obs_space, act_space, args.maps)
+    _extra = {"packet_ttl": args.ttl} if args.ttl is not None else None
+    config = build_config(obs_space, act_space, args.maps, extra_env_cfg=_extra)
     param_space = config.to_dict()
     if args.restore:
         param_space["restore"] = os.path.expanduser(args.restore)
