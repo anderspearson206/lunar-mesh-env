@@ -98,7 +98,7 @@ class LunarRoverMeshEnv(ParallelEnv):
         # The rovers know how to reach the goal (preset path)
         # but since we allow them to leave the path for comms, 
         # we need to reward them for arriving.
-        self.REWARD_GOAL_ARRIVAL = 20.0
+        self.REWARD_GOAL_ARRIVAL = 100.0
         self.REWARD_DIST_SCALE = 5.0
         self.PENALTY_FAIL = -0.1
         self.PENALTY_INVALID_MOVE = -1.0
@@ -108,7 +108,7 @@ class LunarRoverMeshEnv(ParallelEnv):
 
         # DTN config
         self.PACKET_GEN_PROB = 0.5
-        self.REWARD_PACKET_DELIVERY = 0.4
+        self.REWARD_PACKET_DELIVERY = 0.0 #0.4
         self.REWARD_LOW_BUFFER = 0.0  # per-step reward × (1 - buffer_fill); 0 = disabled
         self.PENALTY_BUFFER_OVERFLOW = 0 #-5.0
         self.routing_protocol = routing_protocol  # 'none' | 'epidemic' | 'spray_and_wait'

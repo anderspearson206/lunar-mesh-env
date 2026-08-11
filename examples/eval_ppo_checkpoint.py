@@ -56,6 +56,7 @@ from lunar_mesh_env.marl_env_lozano_rl_nav_crop import LunarRoverMeshLozanoRLNav
 from lunar_mesh_env.marl_env_lozano_res_nav import LunarRoverMeshLozanoResNavEnv
 from lunar_mesh_env.marl_env_lozano_waypoint_nav import LunarRoverMeshLozanoWaypointNavEnv
 from lunar_mesh_env.marl_env_lozano_conn_nav import LunarRoverMeshLozanoConnNavEnv
+from lunar_mesh_env.marl_env_nav_only_epidemic import LunarRoverMeshNavOnlyEpidemicEnv
 from lunar_mesh_env.radio_model_lookup import RadioMapModelLookup
 from models.action_mask_model import TorchActionMaskModel
 from models.mlp_gat_model import TorchMLPGATModel
@@ -65,6 +66,7 @@ from models.mlp_gat_lozano_waypoint_model import TorchMLPGATLozanoWaypointModel
 from models.mlp_gat_lozano_radio_model import TorchMLPGATLozanoRadioModel
 from models.mlp_gat_lozano_cnn_model import TorchMLPGATLozanoCNNModel
 from models.mlp_gat_lozano_crop_model import TorchMLPGATLozanoCropModel
+from models.mlp_nav_only_model import TorchMLPNavOnlyModel
 
 _RADIO_MODES    = {"radio_rssi": "rssi", "radio_crop": "crop", "radio_full": "full"}
 _MLPGAT_SUBENVS = {
@@ -89,14 +91,19 @@ _LOZANO_SUBENVS = {
     "lozano_conn_nav":       LunarRoverMeshLozanoConnNavEnv,
 }
 
-DEFAULT_MAPS = "/home/paolo/Documents/lunar-mesh-env/DATA_MAPS/radio_maps_hm_15.npy" #os.path.join(os.path.dirname(os.path.abspath(__file__)),
+# Nav-only epidemic: epidemic routing is baked in; --routing arg is ignored for this model.
+_NAV_ONLY_ENVS = {
+    "nav_only_epidemic": LunarRoverMeshNavOnlyEpidemicEnv,
+}
+
+DEFAULT_MAPS = "/home/paolo/Documents/lunar-mesh-env/DATA_MAPS/radio_maps_hm_18.npy" #os.path.join(os.path.dirname(os.path.abspath(__file__)),
                 #            "radio_maps_hm_18.npy")
 
 # ---------------------------------------------------------------------------
 # Mirror the same paths / dims used in train_ppo_rllib.py
 # ---------------------------------------------------------------------------
 DATA_ROOT   = "/home/paolo/Documents/lunar-mesh-env/DATA/radio_data_2/radio_data_2"
-HM_PATH     = f"{DATA_ROOT}/hm/hm_15.npy"
+HM_PATH     = f"{DATA_ROOT}/hm/hm_18.npy"
 _PRETRAINED = os.path.join(_REPO_ROOT, "RadioLunaDiff/pretrained_models_network")
 MODEL_PATHS = {
     "k2_model":        os.path.join(_PRETRAINED, "k2unet/best_k2_model.pth"),
@@ -141,6 +148,17 @@ def env_creator(config):
             radio_model=radio_model,
             num_agents=config.get("num_agents", NUM_AGENTS),
             radio_obs=_RADIO_MODES[model_type],
+            render_mode="rgb_array",
+            seed=19,
+        )
+    elif model_type in _NAV_ONLY_ENVS:
+        env_cls = _NAV_ONLY_ENVS[model_type]
+        raw_env = env_cls(
+            hm_path=config.get("hm_path", HM_PATH),
+            radio_model=radio_model,
+            num_agents=config.get("num_agents", NUM_AGENTS),
+            packet_mode='rate',
+            routing_protocol='epidemic',
             render_mode="rgb_array",
             seed=19,
         )
@@ -417,7 +435,8 @@ def main():
                                  "lozano", "lozano_rl_nav", "lozano_rl_nav_radio",
                                  "lozano_rl_nav_cnn", "lozano_rl_nav_crop",
                                  "lozano_res_nav", "lozano_waypoint_nav",
-                                 "lozano_conn_nav"],
+                                 "lozano_conn_nav",
+                                 "nav_only_epidemic"],
                         default="mlp",
                         help="Policy architecture to evaluate (default: mlp)")
     parser.add_argument("--routing", default="none",
@@ -448,6 +467,7 @@ def main():
         print(f"Loading checkpoint: {checkpoint}")
     print(f"Model type: {'routing-only (' + args.routing + ')' if routing_only else args.model}")
 
+    ModelCatalog.register_custom_model("mlp_nav_only_model",      TorchMLPNavOnlyModel)
     ModelCatalog.register_custom_model("action_mask_model",      TorchActionMaskModel)
     ModelCatalog.register_custom_model("mlp_gat_model",          TorchMLPGATModel)
     ModelCatalog.register_custom_model("mlp_gat_radio_model",    TorchMLPGATRadioModel)
@@ -465,7 +485,10 @@ def main():
                   "model_type": args.model,
                   "action_type": lozano_action_type}
 
-    if args.model in _RADIO_MODES:
+    if args.model in _NAV_ONLY_ENVS:
+        custom_model    = "mlp_nav_only_model"
+        extra_model_cfg = {}
+    elif args.model in _RADIO_MODES:
         custom_model      = "mlp_gat_radio_model"
         extra_model_cfg   = {"custom_model_config": {"radio_mode": _RADIO_MODES[args.model]}}
     elif args.model in _LOZANO_SUBENVS:
@@ -578,7 +601,14 @@ def main():
                 hm_path=HM_PATH, radio_model=radio_model, num_agents=NUM_AGENTS,
                 packet_mode='rate', render_mode="rgb_array", seed=seed, **_routing_kwargs,
             )
-        if args.model in _RADIO_MODES:
+        if args.model in _NAV_ONLY_ENVS:
+            env_cls = _NAV_ONLY_ENVS[args.model]
+            return env_cls(
+                hm_path=HM_PATH, radio_model=radio_model, num_agents=NUM_AGENTS,
+                packet_mode='rate', routing_protocol='epidemic',
+                render_mode="rgb_array", seed=seed,
+            )
+        elif args.model in _RADIO_MODES:
             return LunarRoverMeshRadioEnv(
                 hm_path=HM_PATH, radio_model=radio_model, num_agents=NUM_AGENTS,
                 radio_obs=_RADIO_MODES[args.model], render_mode="rgb_array",
